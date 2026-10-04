@@ -178,18 +178,18 @@ class Viewport(QWidget):
                 if pid is not None:
                     cb(pid, np.array(picker.GetPickPosition()), np.array(picker.GetPickNormal()))
             return
-        if self._click_cb is not None:
-            self._click_cb(x, y, bool(self.plotter.iren.interactor.GetShiftKey()))
-            return
         if self._handles is not None:
             i = self._nearest_handle(x, y)
             if i is not None:
                 h = self._handles
-                t0 = self._axis_param(x, y, h["points"][i], h["axis"])
+                t0 = self._handle_param(x, y, h, i)
                 self._handle_drag = {"i": i, "t0": t0}
                 if h.get("on_select"):
                     h["on_select"](i)
                 return
+        if self._click_cb is not None:
+            self._click_cb(x, y, bool(self.plotter.iren.interactor.GetShiftKey()))
+            return
         if self._drag_targets:
             picker = vtkPropPicker()
             if picker.Pick(x, y, 0, self.plotter.renderer):
@@ -208,7 +208,7 @@ class Viewport(QWidget):
         if self._handle_drag is not None:
             x, y = self.plotter.iren.interactor.GetEventPosition()
             h, d = self._handles, self._handle_drag
-            t = self._axis_param(x, y, h["points"][d["i"]], h["axis"])
+            t = self._handle_param(x, y, h, d["i"])
             if t is not None and d["t0"] is not None and h.get("on_drag"):
                 h["on_drag"](d["i"], t - d["t0"])
             return
@@ -245,22 +245,47 @@ class Viewport(QWidget):
         self._install_mouse()
         self.plotter.interactor.setCursor(Qt.CrossCursor if callback else Qt.ArrowCursor)
 
-    def set_handles(self, points, axis=None, on_drag=None, on_select=None, on_done=None) -> None:
-        """Draggable handle points; dragging moves along `axis` (None: off)."""
+    def set_handles(self, points, axis=None, on_drag=None, on_select=None, on_done=None, plane=None) -> None:
+        """Draggable handle points.
+
+        Dragging moves along `axis` (on_drag gets a distance) or, with `plane`
+        (its normal), within that plane (on_drag gets a 3D offset).
+        """
         if points is None:
             self._handles = None
             self.set_overlay("handles", None)
             return
-        self._handles = {"points": np.asarray(points, float), "axis": np.asarray(axis, float),
+        self._handles = {"points": np.asarray(points, float).reshape(-1, 3),
+                         "axis": None if axis is None else np.asarray(axis, float),
+                         "plane": None if plane is None else np.asarray(plane, float),
                          "on_drag": on_drag, "on_select": on_select, "on_done": on_done}
         self._install_mouse()
 
-    def update_handles(self, points, selected=None) -> None:
+    def _handle_param(self, x, y, h, i):
+        point = h["points"][i]
+        if h["plane"] is not None:
+            p0, d = self.display_ray(x, y)
+            n = h["plane"]
+            denom = float(d @ n)
+            if abs(denom) < 1e-12:
+                return None
+            return p0 + d * (float((point - p0) @ n) / denom)
+        if h["axis"] is None:
+            return None
+        return self._axis_param(x, y, point, h["axis"])
+
+    def update_handles(self, points, selected=None, colors=None) -> None:
         if self._handles is None:
             return
-        self._handles["points"] = np.asarray(points, float)
-        cloud = pv.PolyData(np.asarray(points, np.float32))
-        colors = np.tile(np.array(pv.Color(style.ACCENT).int_rgb, np.uint8), (len(points), 1))
+        self._handles["points"] = np.asarray(points, float).reshape(-1, 3)
+        if not len(self._handles["points"]):
+            self.set_overlay("handles", None)
+            return
+        cloud = pv.PolyData(np.asarray(points, np.float32).reshape(-1, 3))
+        n = len(self._handles["points"])
+        if colors is None:
+            colors = [style.ACCENT] * n
+        colors = np.array([pv.Color(c).int_rgb for c in colors], np.uint8)
         if selected is not None:
             colors[selected] = (255, 255, 255)
         cloud["rgb"] = colors

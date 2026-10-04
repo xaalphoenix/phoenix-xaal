@@ -166,3 +166,44 @@ def test_engine_grid_and_surface_cut(engine, tmp_path, sphere):
     ev = engine.wait(engine.submit("surface_cut", pid=one["id"], name="q", kind="curve", frame=frame,
                                    params={"curve": [[-20, 1], [0, 2], [20, 1]]}))
     assert ev.kind in ("result", "error")
+
+
+def test_engine_joint_connect_and_coupon(engine, tmp_path, cube):
+    from phoenix_stl.core import connectors as C
+    part = load(engine, tmp_path, cube, "block")["part"]
+    ev = engine.wait(engine.submit("cut", pid=part["id"], name="block", normal=(0, 0, 1), origin=(0, 0, 1.0)))
+    a, b = [x["part"] for x in ev.result["added"]]
+    ev = engine.wait(engine.submit("joint", pids=[b["id"], a["id"]]))  # B is below the cut: it is side A here
+    assert ev.kind == "result", ev
+    j = ev.result
+    assert np.allclose(j["frame"]["w"], (0, 0, 1)) and j["area"] == pytest.approx(400, rel=1e-6) and not j["hollow"]
+    shape = C.JointShape.from_dict(j["shape"])
+    spec, fit = C.Spec.default("dowel"), C.Fit.preset("resin", "snug")
+    pls, _ = C.auto_place(shape, spec, fit, 2)
+    ev = engine.wait(engine.submit("connect", pids=[b["id"], a["id"]], names=["low", "high"], frame=j["frame"],
+                                   spec=vars(spec), fit=vars(fit), placements=[vars(p) for p in pls]))
+    assert ev.kind == "result", ev
+    r = ev.result
+    assert r["removed"] == [b["id"], a["id"]] and r["warnings"] == []
+    assert [x["part"]["name"] for x in r["added"]] == ["low", "high", "low_pins"]
+    pins = r["added"][2]["part"]
+    assert pins["bounds"][0][0] > max(x["part"]["bounds"][1][0] for x in r["added"][:2])  # beside the parts
+    out = tmp_path / "out"
+    out.mkdir()
+    items = [(x["part"]["id"], str(out / f"{x['part']['name']}.stl")) for x in r["added"]]
+    engine.wait(engine.submit("export", items=items))
+    for _, path in items:
+        assert analyze(load_stl(path))[0].printable
+    # one face picked by hand
+    ev = engine.wait(engine.submit("joint", pids=[r["added"][1]["part"]["id"]], point=(3, 3, 10.0),
+                                   normal=(0, 0.02, 1)))
+    assert ev.kind == "result" and np.allclose(ev.result["frame"]["w"], (0, 0, 1), atol=1e-6)
+    # parts that do not touch
+    far = load(engine, tmp_path, cube, "far")["part"]
+    ev = engine.wait(engine.submit("transform", items=[(far["id"], "far", translation((100, 0, 0)).tolist())]))
+    far2 = ev.result["added"][0]["part"]
+    ev = engine.wait(engine.submit("joint", pids=[far2["id"], r["added"][0]["part"]["id"]]))
+    assert ev.kind == "error" and ev.code == "no_joint"
+    # tolerance coupon
+    ev = engine.wait(engine.submit("coupon", diameter=3.0, clearances=[0.0, 0.05, 0.1, 0.15, 0.2], name="cp"))
+    assert [x["part"]["name"] for x in ev.result["added"]] == ["cp", "cp_pin"]

@@ -97,7 +97,7 @@ def test_undo_redo_move_merge(window, qtbot, tmp_path, sphere):
     # move the upper half up by 15 mm and put the group on the bed
     a = next(p for p in window.parts.parts.values() if p.name == "ball_A")
     window.parts.select(a.id)
-    window.tabs.setCurrentIndex(1)
+    window.tabs.setCurrentIndex(window._tab_index[window.move])
     qtbot.wait(50)
     window.move.set_values(offset=[0, 0, 15])
     window._update_move_preview()
@@ -191,3 +191,75 @@ def test_grid_curve_freeform_modes(window, qtbot, tmp_path, sphere):
     wait_idle(qtbot, window)
     assert names(window) == ["ball_A", "ball_B"]
     assert all(p.status == "printable" for p in window.parts.parts.values())
+
+
+def test_connect_tab(window, qtbot, tmp_path, cube):
+    import numpy as np
+    from PySide6.QtCore import QSettings
+    from phoenix_stl.core.io_stl import save_stl
+
+    QSettings().remove("fit_custom")
+    window.conn_tool.printer_changed()
+
+    src = str(tmp_path / "block.stl")
+    save_stl(cube, src)
+    window.open_files([src])
+    wait_idle(qtbot, window)
+    window.tabs.setCurrentIndex(0)
+    window.cut.offset.setValue(1.0)
+    window.cut.apply_btn.click()
+    wait_idle(qtbot, window)
+    # the two halves are selected after the cut: the joint is found by itself
+    window.tabs.setCurrentIndex(window._tab_index[window.conn])
+    wait_idle(qtbot, window)
+    tool = window.conn_tool
+    assert tool.joint is not None and tool.joint["area"] > 399
+    assert len(tool.placements) == 2 and all(tool.ok)
+    assert window.conn.depth_gap.value() == 0.3 and window.conn.wall.value() == 1.0  # resin defaults
+
+    # add one more by clicking on the face, drag it, then remove it
+    window.conn.add_btn.setChecked(True)
+    fr = tool.joint["frame"]
+    window.viewport.view("top")
+    sx, sy = window.viewport.world_to_display([fr.to_world(np.array([[0.0, 0.0, 0.0]]))[0]])[0]
+    tool._click(sx, sy, False)
+    assert len(tool.placements) == 3 and tool.selected == 2
+    tool._select(2)
+    tool._drag(2, 3.0 * fr.u)
+    assert abs(tool.placements[2].u - 3.0) < 1e-6
+    window.conn.remove_btn.click()
+    assert len(tool.placements) == 2
+    window.conn.add_btn.setChecked(False)
+
+    # magnets: holes only, no pins part
+    window.conn.type.setCurrentIndex(2)
+    qtbot.wait(100)
+    assert len(tool.placements) >= 1
+    window.conn.apply_btn.click()
+    wait_idle(qtbot, window)
+    assert len(window.parts.parts) == 2
+    assert all(p.status == "printable" for p in window.parts.parts.values())
+    window.undo()
+    wait_idle(qtbot, window)
+
+    # dowels make a pins part
+    window.parts.list.selectAll()
+    wait_idle(qtbot, window)
+    window.conn.type.setCurrentIndex(0)
+    qtbot.wait(100)
+    window.conn.apply_btn.click()
+    wait_idle(qtbot, window)
+    assert any(p.name.endswith("_pins") for p in window.parts.parts.values())
+    assert all(p.status == "printable" for p in window.parts.parts.values())
+
+    # tolerance coupon and saving the best gap
+    window.conn.coupon_btn.click()
+    wait_idle(qtbot, window)
+    assert any(p.name.startswith("tolerance_coupon") for p in window.parts.parts.values())
+    holes = window.conn._coupon
+    assert len(holes) == 5 and holes[2] == pytest.approx(window.conn.clearance.value())
+    window.conn.best.setValue(4)
+    window.conn.use_btn.click()
+    assert window.conn.clearance.value() == pytest.approx(holes[3])
+    from PySide6.QtCore import QSettings
+    QSettings().remove("fit_custom")

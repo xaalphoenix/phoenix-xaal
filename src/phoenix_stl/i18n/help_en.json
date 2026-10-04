@@ -243,5 +243,115 @@
     "title": "Joint gap",
     "body": "Removes a thin layer between the two pieces of a curved cut so they slide together after printing.",
     "recommended": "Resin 0.05–0.1 mm, FDM 0.15–0.2 mm. 0 when you will glue the pieces."
+  },
+  "conn.find": {
+    "title": "Find joint",
+    "body": "Finds the flat face two selected parts share (for example the two halves of a cut). Runs by itself when you select two parts."
+  },
+  "conn.pick": {
+    "title": "Pick flat face",
+    "body": "Click a flat face of one part to put connectors on it alone, e.g. magnet holes in a base, or when the other part is in another file.",
+    "tip": "Do the same on the other part with the same settings so the holes match."
+  },
+  "conn.type": {
+    "title": "Connector type",
+    "body": "Dowel: separate pin, holes in both parts. Peg: pin grown on one part. Magnet / metal rod: holes for parts you buy. Square key: stops turning. Tongue & groove: rim all around. Dovetail: sliding wedge rail.",
+    "recommended": "Resin figures: 2–3 dowels or a tongue & groove. Big FDM parts: dowels or brass rods."
+  },
+  "conn.magnet": {
+    "title": "Magnet size",
+    "body": "Common disc magnets (diameter × thickness). The hole is made bigger by the gap per side and deeper by the extra depth."
+  },
+  "conn.size1": {
+    "title": "Diameter / width",
+    "body": "Size of the pin, peg, rod or magnet; for a key its side, for a tongue its width, for a dovetail its narrow width at the face.",
+    "recommended": "Dowels 3–5 mm for figures, 5–8 mm for big FDM parts."
+  },
+  "conn.size2": {
+    "title": "Length / height",
+    "body": "Dowel or rod: total length (half goes into each part). Peg, key, tongue, dovetail: how far it sticks out. Magnet: its thickness.",
+    "recommended": "Dowel length about 3× the diameter."
+  },
+  "conn.edge": {
+    "title": "Distance from edge",
+    "body": "How far the tongue or dovetail stays inside the outline of the joint face.",
+    "tip": "In thin hollow walls the tongue is centred in the wall automatically."
+  },
+  "conn.flare": {
+    "title": "Side angle",
+    "body": "How much the dovetail widens towards its top. More angle holds better but needs more material.",
+    "recommended": "10–20°."
+  },
+  "conn.angle": {
+    "title": "Direction",
+    "body": "Turns the selected key or the dovetail rail (all of them if none is selected). The dovetail slides in along this direction."
+  },
+  "conn.male": {
+    "title": "Male side",
+    "body": "Which part gets the peg, key, tongue or rail; the other part gets the matching hole, groove or channel.",
+    "tip": "Put the male side on the part that is easier to print with it, e.g. the bottom part."
+  },
+  "conn.fit": {
+    "title": "Fit",
+    "body": "How tight the parts go together. Press: tight, no glue. Snug: holds, leaves room for glue. Slide: easy to assemble. Loose: very easy.",
+    "recommended": "Snug for glued figures."
+  },
+  "conn.clearance": {
+    "title": "Gap per side",
+    "body": "Space left between mating surfaces, on each side (a 4 mm pin with 0.1 mm gets a 4.2 mm hole). Set by the printer type and fit; change it freely.",
+    "recommended": "Resin 0.05–0.15 mm, FDM 0.15–0.3 mm. Best: print the tolerance coupon."
+  },
+  "conn.depth_gap": {
+    "title": "Extra hole depth",
+    "body": "Holes are made this much deeper than needed, so glue, resin overcure or a drooping layer cannot stop the parts from closing.",
+    "recommended": "0.3–0.5 mm."
+  },
+  "conn.chamfer": {
+    "title": "Chamfer",
+    "body": "Bevels pin tips and hole mouths so they find each other easily and elephant foot does not block them.",
+    "recommended": "Resin 0.3 mm, FDM 0.5 mm."
+  },
+  "conn.wall": {
+    "title": "Minimum wall",
+    "body": "Material kept around every hole. Connectors are placed only where this fits; red dots break the rule.",
+    "recommended": "Resin 1 mm, FDM 1.6 mm (4 perimeters)."
+  },
+  "conn.count": {
+    "title": "Per contact area",
+    "body": "How many connectors each separate contact area gets (a cut through two legs has two areas).",
+    "recommended": "2 (one would let the parts turn, unless it is a key)."
+  },
+  "conn.auto": {
+    "title": "Place automatically",
+    "body": "Spreads the connectors evenly where they fit with the minimum wall. You can then drag them."
+  },
+  "conn.add": {
+    "title": "Add by clicking",
+    "body": "While on, each click on the joint face adds a connector there. Click an orange dot to select it, drag it to move it."
+  },
+  "conn.remove": {
+    "title": "Remove selected",
+    "body": "Deletes the selected (white) connector."
+  },
+  "conn.clear": {
+    "title": "Clear",
+    "body": "Removes all connectors from the face."
+  },
+  "conn.boss": {
+    "title": "Solid boss",
+    "body": "In hollow models the wall is often too thin for a hole. A solid column is then added inside, joined to the wall, and the hole goes into it. It never pokes out of the outside surface."
+  },
+  "conn.coupon": {
+    "title": "Tolerance coupon",
+    "body": "Makes a small test plate with 5 holes (from a little tighter to a little looser than the current gap) and a matching pin. Hole k is marked with k dots.",
+    "tip": "Print it with the same resin, settings and orientation you will use for the model."
+  },
+  "conn.best": {
+    "title": "Best hole",
+    "body": "After printing the coupon, enter the hole where the pin fits the way you want and press Use this gap. It is saved for this printer and fit type."
+  },
+  "conn.apply": {
+    "title": "Add connectors",
+    "body": "Cuts the holes and adds the pegs to the full-resolution parts. Problems (a hole breaking through a wall) are reported. Undo works as usual."
   }
 }

@@ -27,6 +27,8 @@ from .help_hover import HoverHelp
 from .history import History, Step, snapshot
 from .i18n import LANGS, i18n, t
 from .panels.cut_panel import CutPanel
+from .connect_tool import ConnectTool
+from .panels.connect_panel import ConnectPanel
 from .panels.export_panel import ExportPanel
 from .panels.move_panel import MovePanel, angles_of, compose
 from .panels.repair_panel import RepairPanel
@@ -95,14 +97,16 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.parts_dock)
 
         self.cut = CutPanel(self.help.register)
+        self.conn = ConnectPanel(self.help.register)
         self.move = MovePanel(self.help.register)
         self.repair = RepairPanel(self.help.register)
         self.export = ExportPanel(self.help.register)
         self.tabs = QTabWidget()
         self._tab_keys = []
-        for panel, key in ((self.cut, "tab.cut"), (self.move, "tab.move"), (self.repair, "tab.repair"),
-                           (self.export, "tab.export")):
-            self.tabs.addTab(_scroll(panel), "")
+        self._tab_index = {}
+        for panel, key in ((self.cut, "tab.cut"), (self.conn, "tab.connect"), (self.move, "tab.move"),
+                           (self.repair, "tab.repair"), (self.export, "tab.export")):
+            self._tab_index[panel] = self.tabs.addTab(_scroll(panel), "")
             self._tab_keys.append(key)
         self.tools_dock = QDockWidget(self)
         self.tools_dock.setObjectName("tools")
@@ -123,16 +127,18 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Return), self, lambda: self._curve_command("stop"))
         self._build_status()
         self._build_actions()
+        self.conn_tool = ConnectTool(self)
         self._connect()
         self._pending_plane = None
         self._current_tab = self.tabs.currentIndex()
+        self.conn_tool.printer_changed()
         i18n().changed.connect(self.retranslate)
         self.retranslate()
         self._set_busy_ui(False)
 
     # -- construction -----------------------------------------------------------
     def _tab_is(self, panel) -> bool:
-        return self.tabs.currentIndex() == {self.cut: 0, self.move: 1, self.repair: 2, self.export: 3}[panel]
+        return self.tabs.currentIndex() == self._tab_index[panel]
 
     def _build_status(self):
         sb = self.statusBar()
@@ -239,6 +245,7 @@ class MainWindow(QMainWindow):
         p.delete_requested.connect(self.delete_selected)
         p.merge_requested.connect(self.merge_selected)
         p.printer_changed.connect(self._update_volume)
+        p.printer_changed.connect(self.conn_tool.printer_changed)
         p.volume_toggled.connect(self._volume_toggled)
         self.cut.plane_changed.connect(self._plane_changed)
         self.cut.gizmo_toggled.connect(lambda _: self._update_tool_overlays())
@@ -288,6 +295,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             self.progress_text.setText("")
         self.cut.set_busy(busy)
+        self.conn.set_busy(busy)
         self.move.set_busy(busy)
         self.export.set_busy(busy)
         self.parts.set_busy(busy)
@@ -514,6 +522,7 @@ class MainWindow(QMainWindow):
             self._after_commit(lambda: self._swap(self.history.take_redo(), undo=False))
 
     def _swap(self, step: Step, undo: bool):
+        self.conn_tool._no_auto = False  # after undo/redo, propose connectors again
         self._end_move_session()
         remove, restore = (step.added, step.removed) if undo else (step.removed, step.added)
         for s in remove:
@@ -563,8 +572,10 @@ class MainWindow(QMainWindow):
     def _job_failed(self, job, code, detail):
         if code == "cancelled":
             self.status("progress.cancelled")
-        else:
+        elif not (job.op == "joint" and job.tag.get("auto") and code == "no_joint"):
             self._error(code, detail)
+        if job.op == "joint":
+            self.conn_tool.joint_failed(job, code)
         if job.op == "analyze":
             p = self.parts.parts.get(job.tag["pid"])
             if p is not None:
@@ -602,7 +613,7 @@ class MainWindow(QMainWindow):
         if p.status == "problems":
             self.status("msg.problems", name=p.name)
             if job.tag.get("auto"):
-                self.tabs.setCurrentIndex(2)
+                self.tabs.setCurrentIndex(self._tab_index[self.repair])
         else:
             self.status("msg.printable", name=p.name)
 
@@ -626,9 +637,7 @@ class MainWindow(QMainWindow):
             return {"color": old[0].color if (old and i == 0) else None,
                     "status": "printable" if inherit else "unknown"}
 
-        new = self._apply_change(r, "action.cut", meta)
-        if new:
-            self.parts.select(new[0].id)
+        new = self._apply_change(r, "action.cut", meta)  # both pieces stay selected (ready to connect)
         if r["open_loops"]:
             QMessageBox.warning(self, APP_NAME, t("cut.open_warning"))
         elif not inherit:
@@ -768,19 +777,22 @@ class MainWindow(QMainWindow):
     # -- selection & overlays ---------------------------------------------------------
     def _tab_changed(self, index):
         prev, self._current_tab = self._current_tab, index
-        if prev == 1 and index != 1:
+        move = self._tab_index[self.move]
+        if prev == move and index != move:
             if self._move_dirty():
                 self.commit_move()
             else:
                 self._end_move_session()
-        if index == 1:
+        if index == move:
             self._start_move_session()
         self._update_tool_overlays()
+        self.conn_tool.refresh()
 
     def _multi_selection_changed(self):
         sel = [p.id for p in self.parts.selected_parts()]
         self.viewport.set_focus(sel if len(self.parts.parts) > 1 and sel else None)
         self._set_busy_ui(self.engine.busy)
+        self.conn_tool.refresh()
         if self._tab_is(self.move):
             current = set(self._pending["pids"]) if self._pending else set()
             if current != {p.id for p in self.parts.selected_parts() if p.visible}:
@@ -800,6 +812,7 @@ class MainWindow(QMainWindow):
             self.repair.set_report(p.report, checking=p.status == "checking")
         self._multi_selection_changed()
         self._update_tool_overlays()
+        self.conn_tool.refresh()
         self._update_volume()
         self._update_problems()
 
@@ -1113,6 +1126,15 @@ class MainWindow(QMainWindow):
             self._analyze(p)
         self.status("cut.done", n=len(new))
 
+    def _done_joint(self, job, r):
+        self.conn_tool.done_joint(job, r)
+
+    def _done_connect(self, job, r):
+        self.conn_tool.done_connect(job, r)
+
+    def _done_coupon(self, job, r):
+        self.conn_tool.done_coupon(job, r)
+
     def _volume_toggled(self, on):
         self.a_volume.setChecked(on)
         self._update_volume()
@@ -1175,8 +1197,9 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setText(t("progress.cancel"))
         for code, a in self.lang_actions.items():
             a.setChecked(code == i18n().lang)
-        for panel in (self.parts, self.cut, self.move, self.repair, self.export):
+        for panel in (self.parts, self.cut, self.conn, self.move, self.repair, self.export):
             panel.retranslate()
+        self.conn_tool.validate()
         key, kw = self._last_msg
         if key == "repair.done":
             self._show_repair_log(kw["log"])

@@ -16,6 +16,7 @@ import numpy as np
 
 from ..core import hardware
 from ..core.analyze import analyze as _analyze
+from ..core import connectors as conn
 from ..core.boolean import NotSolid, union
 from ..core.cut import plane_cut
 from ..core.grid import cell_name, grid_cut
@@ -24,6 +25,7 @@ from ..core.io_stl import load_stl, save_stl, triangle_count
 from ..core.lod import display_mesh
 from ..core.mesh import Mesh, report
 from ..core.repair import RepairOptions, repair as _repair
+from ..core.section import find_joint, flat_face_at
 from ..core.transform import transform_mesh, translation
 
 
@@ -132,7 +134,7 @@ def op_surface_cut(store, progress, pid: str, name: str, kind: str, frame: dict,
     """Cut along a drawn curve (kind "curve") or a bent surface (kind "freeform")."""
     mesh = store.get(pid)
     _ensure_memory("boolean", 2 * mesh.n_faces)
-    fr = Frame(*(np.asarray(frame[k], float) for k in ("origin", "u", "v", "w")))
+    fr = _frame_of(frame)
     b = mesh.bounds
     reach = 2.0 * float(np.linalg.norm(b[1] - b[0])) + float(np.linalg.norm((b[0] + b[1]) / 2 - fr.origin))
     report(progress, 0.05, "Preparing cut")
@@ -157,6 +159,85 @@ def op_surface_cut(store, progress, pid: str, name: str, kind: str, frame: dict,
         added.append(_store_new(store, part, f"{name}_{tag}", preview_faces,
                                 _sub(progress, a, a + 0.25 / len(sides)), side=side))
     return {"removed": [pid], "added": added, "open_loops": 0, "loops": 0, "warnings": []}
+
+
+def _frame_of(frame: dict) -> Frame:
+    return Frame(*(np.asarray(frame[k], float) for k in ("origin", "u", "v", "w")))
+
+
+def _frame_dict(fr: Frame) -> dict:
+    return {k: np.asarray(getattr(fr, k), float).tolist() for k in ("origin", "u", "v", "w")}
+
+
+def _previews(store, pids) -> dict:
+    """Light meshes per side, for ray tests that need no full detail."""
+    out = {}
+    for side, pid in zip("AB", pids):
+        prev = store.get_preview(pid)
+        if prev is not None:
+            out[side] = prev
+    return out
+
+
+def op_joint(store, progress, pids: list, point=None, normal=None):
+    """The joint face of two touching parts, or the flat face of one part through a clicked point.
+
+    Returns the face frame (w points out of the first part) and its outlines.
+    """
+    report(progress, 0.05, "Finding the joint")
+    meshes = [store.get(pid) for pid in pids]
+    if len(meshes) == 2:
+        j = find_joint(meshes[0], meshes[1])
+        if j is None:
+            raise EngineError("no_joint")
+    else:
+        j = flat_face_at(meshes[0], point, normal)
+        if j is None:
+            raise EngineError("no_face")
+    fr = Frame.from_normal(j["origin"], j["normal"])
+    shape = conn.joint_shape(dict(zip("AB", meshes)), fr, ray_meshes=_previews(store, pids),
+                             progress=_sub(progress, 0.3, 1.0))
+    if shape.solid.area() <= 1e-9:
+        raise EngineError("no_joint")
+    return {"pids": list(pids), "frame": _frame_dict(fr), "shape": shape.to_dict(),
+            "area": shape.solid.area(), "hollow": shape.hollow}
+
+
+def op_connect(store, progress, pids: list, names: list, frame: dict, spec: dict, fit: dict,
+               placements: list, male: str = "A", boss: bool = True, preview_faces: int = 2_000_000):
+    """Add connectors to one part or to both sides of a joint. Dowel pins come out as an extra part."""
+    sides = "AB"[:len(pids)]
+    meshes = {side: store.get(pid) for side, pid in zip(sides, pids)}
+    _ensure_memory("boolean", sum(m.n_faces for m in meshes.values()))
+    fr = _frame_of(frame)
+    shape = conn.joint_shape(meshes, fr, ray_meshes=_previews(store, pids), progress=_sub(progress, 0.0, 0.15))
+    reach = 2.0 * max(float(np.linalg.norm(m.size)) for m in meshes.values()) + 10.0
+    pl = conn.plan(conn.Spec(**spec), conn.Fit(**fit), [conn.Placement(**p) for p in placements], shape,
+                   sides, male, boss, reach)
+    try:
+        out, pins, warnings = conn.apply_plan(meshes, pl, fr, _sub(progress, 0.15, 0.8))
+    except NotSolid as e:
+        raise EngineError("not_solid_cut", str(e)) from None
+    added = []
+    for i, side in enumerate(sides):
+        a = 0.8 + 0.15 * i / len(sides)
+        added.append(_store_new(store, out[side], names[i], preview_faces, _sub(progress, a, a + 0.15 / len(sides))))
+    if pins is not None:
+        lo = np.min([m.bounds[0] for m in out.values()], axis=0)
+        hi = np.max([m.bounds[1] for m in out.values()], axis=0)
+        pb = pins.bounds
+        pins = transform_mesh(pins, translation((hi[0] + 10 - pb[0][0], lo[1] - pb[0][1], lo[2] - pb[0][2])))
+        added.append(_store_new(store, pins, f"{names[0]}_pins", preview_faces, pins=True))
+    return {"removed": list(pids), "added": added, "warnings": warnings}
+
+
+def op_coupon(store, progress, diameter: float, clearances: list, chamfer: float = 0.3, name: str = "coupon",
+              preview_faces: int = 2_000_000):
+    """Tolerance test plate (one hole per clearance) and its test pin."""
+    report(progress, 0.1, "Making the coupon")
+    plate, pin = conn.tolerance_coupon(diameter, clearances, chamfer)
+    return {"removed": [], "added": [_store_new(store, plate, name, preview_faces),
+                                     _store_new(store, pin, f"{name}_pin", preview_faces)]}
 
 
 def op_transform(store, progress, items: list, on_bed: bool = False, centered: bool = False):
@@ -247,6 +328,9 @@ OPS = {
     "cut": op_cut,
     "grid_cut": op_grid_cut,
     "surface_cut": op_surface_cut,
+    "joint": op_joint,
+    "connect": op_connect,
+    "coupon": op_coupon,
     "transform": op_transform,
     "merge": op_merge,
     "restore": op_restore,

@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 
+from .core import connectors as C
 from .core.analyze import analyze
 from .core.io_stl import load_stl, save_stl
 from .core.mesh import Mesh
@@ -52,6 +53,18 @@ def run() -> int:
         part = ev.result["added"][0]["part"]
         ev = eng.wait(eng.submit("cut", pid=part["id"], name="sphere", normal=(0.2, 0.1, 1), origin=(0, 0, 1)))
         assert ev.kind == "result" and len(ev.result["added"]) == 2, ev
+        halves = [p["part"] for p in ev.result["added"]]
+        # connectors: find the joint, place two dowels, add them (pins come out as a third part)
+        ev = eng.wait(eng.submit("joint", pids=[h["id"] for h in halves]))
+        assert ev.kind == "result", ev
+        shape = C.JointShape.from_dict(ev.result["shape"])
+        spec, fit = C.Spec("dowel", 2.0, 6.0), C.Fit.preset("resin", "snug")
+        pls, _ = C.auto_place(shape, spec, fit, 2)
+        assert len(pls) == 2, pls
+        ev = eng.wait(eng.submit("connect", pids=[h["id"] for h in halves], names=[h["name"] for h in halves],
+                                 frame=ev.result["frame"], spec=vars(spec), fit=vars(fit),
+                                 placements=[vars(p) for p in pls]))
+        assert ev.kind == "result" and len(ev.result["added"]) == 3 and not ev.result["warnings"], ev
         outs = []
         for p in ev.result["added"]:
             a = eng.wait(eng.submit("analyze", pid=p["part"]["id"]))
