@@ -15,6 +15,7 @@ from .core import connectors as C
 from .core.analyze import analyze
 from .core.io_stl import load_stl, save_stl
 from .core.mesh import Mesh
+from .core.mold import MoldParams
 from .engine import EngineClient
 
 
@@ -69,6 +70,14 @@ def run() -> int:
         for p in ev.result["added"]:
             a = eng.wait(eng.submit("analyze", pid=p["part"]["id"]))
             assert a.result["report"]["printable"], a.result
+            outs.append((p["part"]["id"], os.path.join(tmp, p["part"]["name"] + ".stl")))
+        # silicone mother mold (draft quality) around the original sphere
+        ev = eng.wait(eng.submit("mold_build", pid=part["id"], name="sphere",
+                                 params=MoldParams(resolution=1.0, feet=3).to_dict()))
+        assert ev.kind == "result" and len(ev.result["added"]) == 3, ev
+        th = ev.result["info"]["thickness"]
+        assert abs(th["min"] - 5) < 0.05 and abs(th["max"] - 5) < 0.05, th
+        for p in ev.result["added"]:
             outs.append((p["part"]["id"], os.path.join(tmp, p["part"]["name"] + ".stl")))
         ev = eng.wait(eng.submit("export", items=outs))
         assert ev.kind == "result", ev

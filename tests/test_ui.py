@@ -263,3 +263,35 @@ def test_connect_tab(window, qtbot, tmp_path, cube):
     assert window.conn.clearance.value() == pytest.approx(holes[3])
     from PySide6.QtCore import QSettings
     QSettings().remove("fit_custom")
+
+
+def test_mold_tab(window, qtbot, tmp_path, sphere):
+    from phoenix_stl.core.io_stl import save_stl
+
+    src = str(tmp_path / "ball.stl")
+    save_stl(sphere, src)
+    window.open_files([src])
+    wait_idle(qtbot, window)
+    window.tabs.setCurrentIndex(window._tab_index[window.mold])
+    wait_idle(qtbot, window)
+    tool = window.mold_tool
+    assert tool.data is not None and tool.sprue is not None
+    assert "ml" in window.mold.info.text()
+    # moving the pour marker sticks; changing a setting refreshes the preview
+    tool._select(0)
+    tool._drag(0, (2.0, 0.0, 0.0))
+    assert tool.sprue_user and abs(tool.sprue[0] - tool._drag_base[0] - 2.0) < 1e-6
+    before = tool.data["silicone_ml"]
+    window.mold.thickness.setValue(3.0)
+    qtbot.wait(700)
+    wait_idle(qtbot, window)
+    assert tool.data["silicone_ml"] < before
+    window.mold.quality.setCurrentIndex(0)
+    window.mold.build_btn.click()
+    wait_idle(qtbot, window)
+    names = sorted(p.name for p in window.parts.parts.values())
+    assert names == ["ball", "ball_mold_A", "ball_mold_B", "ball_mold_base"]
+    assert "3.00" in window.mold.info.text()  # measured thickness after building
+    window.undo()
+    wait_idle(qtbot, window)
+    assert sorted(p.name for p in window.parts.parts.values()) == ["ball"]

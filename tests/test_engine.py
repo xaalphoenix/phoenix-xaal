@@ -207,3 +207,26 @@ def test_engine_joint_connect_and_coupon(engine, tmp_path, cube):
     # tolerance coupon
     ev = engine.wait(engine.submit("coupon", diameter=3.0, clearances=[0.0, 0.05, 0.1, 0.15, 0.2], name="cp"))
     assert [x["part"]["name"] for x in ev.result["added"]] == ["cp", "cp_pin"]
+
+
+def test_engine_mold(engine, tmp_path, sphere):
+    from phoenix_stl.core.mold import MoldParams
+    part = load(engine, tmp_path, sphere, "ball")["part"]
+    ev = engine.wait(engine.submit("mold_preview", pid=part["id"], params=MoldParams(resolution=0).to_dict()))
+    assert ev.kind == "result", ev
+    r = ev.result
+    assert len(r["shell"][1]) > 0 and r["sprue"] is not None and r["silicone_ml"] > 5
+    ev = engine.wait(engine.submit("mold_build", pid=part["id"], name="ball",
+                                   params=MoldParams(resolution=1.0, feet=3).to_dict()))
+    assert ev.kind == "result", ev
+    names = [x["part"]["name"] for x in ev.result["added"]]
+    assert names == ["ball_mold_A", "ball_mold_B", "ball_mold_base"] and ev.result["removed"] == []
+    assert [x["mold"] for x in ev.result["added"]] == ["A", "B", "base"]
+    info = ev.result["info"]
+    assert abs(info["thickness"]["min"] - 5) < 0.02 and abs(info["thickness"]["max"] - 5) < 0.02
+    out = tmp_path / "mold"
+    out.mkdir()
+    items = [(x["part"]["id"], str(out / f"{x['part']['name']}.stl")) for x in ev.result["added"]]
+    engine.wait(engine.submit("export", items=items))
+    for _, path in items:
+        assert analyze(load_stl(path))[0].printable

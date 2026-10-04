@@ -671,12 +671,7 @@ def _compose(items) -> m3d.Manifold | None:
 
 
 def _to_mesh(man: m3d.Manifold):
-    """Manifold to mesh. Distinct points that an STL float cannot tell apart would merge into
-    broken edges, so if any collapse, sub-micron features are simplified away first."""
-    mesh = from_manifold(man)
-    if mesh.n_vertices < man.num_vert():
-        mesh = from_manifold(man.simplify(10 * SIMPLIFY))
-    return mesh
+    return from_manifold(man)
 
 
 def apply_plan(meshes: dict, pl: Plan, frame: Frame, progress=None):

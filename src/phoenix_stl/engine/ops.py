@@ -17,6 +17,7 @@ import numpy as np
 from ..core import hardware
 from ..core.analyze import analyze as _analyze
 from ..core import connectors as conn
+from ..core import mold as moldlib
 from ..core.boolean import NotSolid, union
 from ..core.cut import plane_cut
 from ..core.grid import cell_name, grid_cut
@@ -240,6 +241,52 @@ def op_coupon(store, progress, diameter: float, clearances: list, chamfer: float
                                      _store_new(store, pin, f"{name}_pin", preview_faces)]}
 
 
+def _mold_check(model: Mesh, p) -> None:
+    need = moldlib.memory_estimate(model, p)
+    avail = hardware.system_info()["ram_available"]
+    if need > 0.8 * avail:
+        raise EngineError("memory", f"{need / 2**30:.1f}|{avail / 2**30:.1f}")
+
+
+def op_mold_preview(store, progress, pid: str, params: dict, preview_faces: int = 300_000):
+    """Quick coarse mold: shell to show, pour/vent/feet positions, silicone estimate."""
+    model = store.get(pid)
+    p = moldlib.MoldParams.from_dict(params)
+    if p.resolution <= 0:
+        p.resolution = max(1.0, float(model.size.max()) / 90.0)
+    _ensure_memory("analyze", model.n_faces)
+    _mold_check(model, p)
+    r = moldlib.preview(model, p, progress)
+    shell = r.pop("shell")
+    if shell.n_faces > preview_faces:
+        shell = display_mesh(shell, preview_faces)
+    r["shell"] = (shell.vertices, shell.faces)
+    r["resolution"] = p.resolution
+    return r
+
+
+def op_mold_build(store, progress, pid: str, name: str, params: dict, preview_faces: int = 2_000_000):
+    """Build the mother mold parts (two halves or one shell, and the base plate) as new parts."""
+    model = store.get(pid)
+    p = moldlib.MoldParams.from_dict(params)
+    _ensure_memory("boolean", 2 * model.n_faces)
+    _mold_check(model, p)
+    try:
+        res = moldlib.build(model, p, _sub(progress, 0.0, 0.9))
+    except NotSolid as e:
+        raise EngineError("mold_failed", str(e)) from None
+    except ValueError as e:
+        raise EngineError("mold_failed", str(e)) from None
+    labels = {"A": "mold_A", "B": "mold_B", "shell": "mold", "base": "mold_base"}
+    added = []
+    keys = list(res.parts)
+    for i, k in enumerate(keys):
+        a = 0.9 + 0.1 * i / len(keys)
+        added.append(_store_new(store, res.parts[k], f"{name}_{labels[k]}", preview_faces,
+                                _sub(progress, a, a + 0.1 / len(keys)), mold=k))
+    return {"removed": [], "added": added, "info": res.info, "warnings": res.warnings}
+
+
 def op_transform(store, progress, items: list, on_bed: bool = False, centered: bool = False):
     """items: [(pid, name, 4x4 matrix)] -> each part replaced by its moved copy.
 
@@ -331,6 +378,8 @@ OPS = {
     "joint": op_joint,
     "connect": op_connect,
     "coupon": op_coupon,
+    "mold_preview": op_mold_preview,
+    "mold_build": op_mold_build,
     "transform": op_transform,
     "merge": op_merge,
     "restore": op_restore,

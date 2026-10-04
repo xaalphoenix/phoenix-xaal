@@ -12,6 +12,7 @@ datas = [
     (os.path.join(src, "phoenix_stl", "assets"), os.path.join("phoenix_stl", "assets")),
 ]
 datas += collect_data_files("pyvista")
+datas += collect_data_files("skimage", includes=["**/*.pyi"])  # its lazy loader reads these stubs
 binaries = []
 # Only the VTK modules the app really loads (recorded at runtime); bundling all
 # of vtkmodules would add ~500 MB.
@@ -19,7 +20,10 @@ with open(os.path.join(SPECPATH, "vtk_modules.txt")) as f:
     vtk_modules = [line.strip() for line in f if line.strip()]
 hiddenimports = (collect_submodules("phoenix_stl") + vtk_modules
                  + ["vtkmodules.util.numpy_support", "vtkmodules.qt.QVTKRenderWindowInteractor",
-                    "pyvistaqt", "scipy.sparse.csgraph._validation", "manifold3d", "mapbox_earcut"])
+                    "pyvistaqt", "scipy.sparse.csgraph._validation", "manifold3d", "mapbox_earcut",
+                    "lazy_loader", "skimage.measure._marching_cubes_lewiner",
+                    "skimage.measure._marching_cubes_lewiner_cy", "skimage.measure._marching_cubes_lewiner_luts",
+                    "matplotlib.path"])
 
 a = Analysis(
     [os.path.join(SPECPATH, "launcher.py")],

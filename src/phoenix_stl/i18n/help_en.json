@@ -353,5 +353,118 @@
   "conn.apply": {
     "title": "Add connectors",
     "body": "Cuts the holes and adds the pegs to the full-resolution parts. Problems (a hole breaking through a wall) are reported. Undo works as usual."
+  },
+  "mold.thickness": {
+    "title": "Silicone thickness",
+    "body": "The gap between the model and the shell, filled with silicone. It is the same everywhere and exact to a few micrometres.",
+    "recommended": "3–5 mm for small figures, 5–10 mm for big or heavy parts."
+  },
+  "mold.wall": {
+    "title": "Shell wall",
+    "body": "Thickness of the printed shell. It only has to hold the soft silicone in shape.",
+    "recommended": "2–3 mm resin, 3–4 mm FDM."
+  },
+  "mold.quality": {
+    "title": "Quality",
+    "body": "Size of the voxels used to build the shell surfaces. Finer is smoother but slower and needs more memory. The silicone thickness is exact at every quality; only the smoothness of the shell changes.",
+    "recommended": "Normal; Draft to try ideas quickly."
+  },
+  "mold.base_z": {
+    "title": "Base height",
+    "body": "Height of the base plane: the mold is open here and stands on the base plate. Normally the bottom of the model (Model bottom).",
+    "tip": "Lower it and turn on the rod for a model without a flat bottom."
+  },
+  "mold.plate": {
+    "title": "Base plate",
+    "body": "A plate the model and the shell stand on. The shell's lower edge sits in a groove of the plate, which seals the silicone and aligns the shell."
+  },
+  "mold.plate_margin": {
+    "title": "Plate margin",
+    "body": "How far the plate reaches beyond the shell (and its flanges)."
+  },
+  "mold.plate_thickness": {
+    "title": "Plate thickness",
+    "body": "Material under the groove."
+  },
+  "mold.groove": {
+    "title": "Groove depth",
+    "body": "How deep the shell's edge sits in the plate. The groove is wider than the wall by the fit gap."
+  },
+  "mold.locator": {
+    "title": "Model pocket",
+    "body": "A shallow pocket in the plate matching the model's footprint, so the model goes back to exactly the same place."
+  },
+  "mold.rod": {
+    "title": "Rod",
+    "body": "A rod from the plate up to the lowest point of the model, for models that do not stand on a flat bottom. Glue the model onto it."
+  },
+  "mold.split": {
+    "title": "Two halves",
+    "body": "Splits the shell in two so it can be opened to take the cured silicone out. The halves get flanges with bolt holes and alignment keys."
+  },
+  "mold.angle": {
+    "title": "Parting direction",
+    "body": "Direction of the parting plane, in degrees around the vertical axis. By default the plane runs along the longer side of the model.",
+    "tip": "Choose a direction where no part of the model wraps around the shell's halves."
+  },
+  "mold.offset": {
+    "title": "Parting offset",
+    "body": "Moves the parting plane sideways from the middle of the model."
+  },
+  "mold.flange": {
+    "title": "Flanges",
+    "body": "Rims along the parting line of both halves, for bolts or clamps."
+  },
+  "mold.bolt": {
+    "title": "Bolts",
+    "body": "Bolt holes through both flanges, spread evenly along them (M3: 3.4 mm, M4: 4.5 mm holes)."
+  },
+  "mold.nuts": {
+    "title": "Nut traps",
+    "body": "Hexagon pockets on one half so the nuts cannot turn."
+  },
+  "mold.keys": {
+    "title": "Alignment keys",
+    "body": "Small pegs on one half's flange and matching holes on the other, so the halves always close the same way."
+  },
+  "mold.sprue": {
+    "title": "Pour hole",
+    "body": "Where the silicone is poured in, by default the highest point of the cavity (orange dot). Drag the dot to move it.",
+    "recommended": "6–10 mm."
+  },
+  "mold.chimney": {
+    "title": "Tube height",
+    "body": "How far the pour and vent tubes stick out of the shell. Silicone rising in them shows the mold is full."
+  },
+  "mold.funnel": {
+    "title": "Funnel",
+    "body": "A cone on top of the pour hole for easier pouring."
+  },
+  "mold.vents": {
+    "title": "Vents",
+    "body": "Thin tubes at the places where air would be trapped (blue dots): high points of the cavity other than the pour hole. Find vents places them automatically.",
+    "recommended": "2–3 mm."
+  },
+  "mold.add_vent": {
+    "title": "Add / remove vents",
+    "body": "While Add vent is on, click on the model where a vent should go. Select a dot and press Remove to delete it."
+  },
+  "mold.feet": {
+    "title": "Feet",
+    "body": "Posts on top of the shell that all end at the same height: turned over for casting, the mold stands level on them.",
+    "tip": "They are made taller than the pour and vent tubes."
+  },
+  "mold.density": {
+    "title": "Silicone density",
+    "body": "Used to turn the volume into grams (see the silicone's data sheet).",
+    "recommended": "About 1.1 g/ml."
+  },
+  "mold.preview": {
+    "title": "Preview",
+    "body": "Updates the coarse preview (it also updates by itself when you change a setting)."
+  },
+  "mold.build": {
+    "title": "Build mold",
+    "body": "Builds the mold at the chosen quality and adds the parts (two halves and the base plate) to the list. The silicone thickness is measured on the result."
   }
 }

@@ -58,7 +58,7 @@ QToolButton {{ background: transparent; border: 1px solid transparent; border-ra
 QToolButton:hover {{ background: {PANEL_2}; border-color: {BORDER}; }}
 QToolButton:disabled {{ color: {TEXT_DIM}; }}
 QTabWidget::pane {{ border: none; background: {PANEL}; }}
-QTabBar::tab {{ background: {PANEL}; color: {TEXT_DIM}; padding: 8px 18px; border: none;
+QTabBar::tab {{ background: {PANEL}; color: {TEXT_DIM}; padding: 8px 10px; border: none;
                border-bottom: 2px solid transparent; }}
 QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QGroupBox {{ border: 1px solid {BORDER}; border-radius: 8px; margin-top: 14px; padding: 10px 8px 8px 8px; }}

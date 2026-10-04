@@ -28,8 +28,10 @@ from .history import History, Step, snapshot
 from .i18n import LANGS, i18n, t
 from .panels.cut_panel import CutPanel
 from .connect_tool import ConnectTool
+from .mold_tool import MoldTool
 from .panels.connect_panel import ConnectPanel
 from .panels.export_panel import ExportPanel
+from .panels.mold_panel import MoldPanel
 from .panels.move_panel import MovePanel, angles_of, compose
 from .panels.repair_panel import RepairPanel
 from .parts_panel import Part, PartsPanel, fit_state
@@ -99,13 +101,14 @@ class MainWindow(QMainWindow):
         self.cut = CutPanel(self.help.register)
         self.conn = ConnectPanel(self.help.register)
         self.move = MovePanel(self.help.register)
+        self.mold = MoldPanel(self.help.register)
         self.repair = RepairPanel(self.help.register)
         self.export = ExportPanel(self.help.register)
         self.tabs = QTabWidget()
         self._tab_keys = []
         self._tab_index = {}
         for panel, key in ((self.cut, "tab.cut"), (self.conn, "tab.connect"), (self.move, "tab.move"),
-                           (self.repair, "tab.repair"), (self.export, "tab.export")):
+                           (self.mold, "tab.mold"), (self.repair, "tab.repair"), (self.export, "tab.export")):
             self._tab_index[panel] = self.tabs.addTab(_scroll(panel), "")
             self._tab_keys.append(key)
         self.tools_dock = QDockWidget(self)
@@ -128,6 +131,7 @@ class MainWindow(QMainWindow):
         self._build_status()
         self._build_actions()
         self.conn_tool = ConnectTool(self)
+        self.mold_tool = MoldTool(self)
         self._connect()
         self._pending_plane = None
         self._current_tab = self.tabs.currentIndex()
@@ -296,6 +300,7 @@ class MainWindow(QMainWindow):
             self.progress_text.setText("")
         self.cut.set_busy(busy)
         self.conn.set_busy(busy)
+        self.mold.set_busy(busy)
         self.move.set_busy(busy)
         self.export.set_busy(busy)
         self.parts.set_busy(busy)
@@ -332,11 +337,11 @@ class MainWindow(QMainWindow):
 
     # -- parts bookkeeping ------------------------------------------------------------
     def _add_part(self, info: dict, preview, color: str | None = None, status="unknown", index=None,
-                  report=None, visible=True) -> Part:
+                  report=None, visible=True, extra=None) -> Part:
         v, f = preview
         p = Part(id=info["id"], name=info["name"], n_faces=info["n_faces"], bounds=info["bounds"],
                  color=color or self.parts.next_color(), status=status, report=report,
-                 visible=visible, preview=Mesh(v, f))
+                 visible=visible, preview=Mesh(v, f), extra=dict(extra or {}))
         self.viewport.set_part(p.id, v, f, p.color)
         if not visible:
             self.viewport.set_visible(p.id, False)
@@ -550,7 +555,8 @@ class MainWindow(QMainWindow):
             row = s.extra.get("row")
             restored.append(self._add_part(info, previews[s.id], s.color, s.status,
                                            index=row if row is not None and row >= 0 else None,
-                                           report=s.report, visible=s.visible))
+                                           report=s.report, visible=s.visible,
+                                           extra={k: v for k, v in s.extra.items() if k != "row"}))
         if restored:
             self.parts.select_many([p.id for p in restored])
         self.status(job.tag["key"], what="@" + job.tag["label"])
@@ -576,6 +582,8 @@ class MainWindow(QMainWindow):
             self._error(code, detail)
         if job.op == "joint":
             self.conn_tool.joint_failed(job, code)
+        if job.op == "mold_preview":
+            self.mold_tool.preview_failed(job)
         if job.op == "analyze":
             p = self.parts.parts.get(job.tag["pid"])
             if p is not None:
@@ -787,6 +795,7 @@ class MainWindow(QMainWindow):
             self._start_move_session()
         self._update_tool_overlays()
         self.conn_tool.refresh()
+        self.mold_tool.refresh()
 
     def _multi_selection_changed(self):
         sel = [p.id for p in self.parts.selected_parts()]
@@ -813,6 +822,7 @@ class MainWindow(QMainWindow):
         self._multi_selection_changed()
         self._update_tool_overlays()
         self.conn_tool.refresh()
+        self.mold_tool.refresh()
         self._update_volume()
         self._update_problems()
 
@@ -1135,6 +1145,12 @@ class MainWindow(QMainWindow):
     def _done_coupon(self, job, r):
         self.conn_tool.done_coupon(job, r)
 
+    def _done_mold_preview(self, job, r):
+        self.mold_tool.done_preview(job, r)
+
+    def _done_mold_build(self, job, r):
+        self.mold_tool.done_build(job, r)
+
     def _volume_toggled(self, on):
         self.a_volume.setChecked(on)
         self._update_volume()
@@ -1197,7 +1213,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setText(t("progress.cancel"))
         for code, a in self.lang_actions.items():
             a.setChecked(code == i18n().lang)
-        for panel in (self.parts, self.cut, self.conn, self.move, self.repair, self.export):
+        for panel in (self.parts, self.cut, self.conn, self.move, self.mold, self.repair, self.export):
             panel.retranslate()
         self.conn_tool.validate()
         key, kw = self._last_msg

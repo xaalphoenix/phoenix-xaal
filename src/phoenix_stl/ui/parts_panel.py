@@ -220,7 +220,9 @@ class PartsPanel(QWidget):
         if extend:
             item.setSelected(True)
         else:
+            self.list.clearSelection()
             self.list.setCurrentItem(item)
+            item.setSelected(True)
 
     def select_many(self, pids: list[str]) -> None:
         self.list.clearSelection()

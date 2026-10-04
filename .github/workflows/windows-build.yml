@@ -25,7 +25,7 @@ jobs:
       - name: Core and engine tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest tests/test_core.py tests/test_engine.py tests/test_cuts_b.py tests/test_connectors.py -q
+        run: pytest tests/test_core.py tests/test_engine.py tests/test_cuts_b.py tests/test_connectors.py tests/test_mold.py -q
 
       - name: Build app (PyInstaller)
         run: pyinstaller --noconfirm packaging/phoenix_stl.spec
