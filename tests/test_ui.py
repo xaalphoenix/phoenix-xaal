@@ -138,3 +138,56 @@ def test_undo_redo_move_merge(window, qtbot, tmp_path, sphere):
     assert names(window) == ["trophy"]
     window.undo()
     assert names(window) == [merged.name]
+
+
+def test_grid_curve_freeform_modes(window, qtbot, tmp_path, sphere):
+    import numpy as np
+    from phoenix_stl.core.io_stl import save_stl
+
+    src = str(tmp_path / "ball.stl")
+    save_stl(sphere, src)
+    window.open_files([src])
+    wait_idle(qtbot, window)
+    window.tabs.setCurrentIndex(0)
+
+    # grid: 2 x 1 x 2 pieces; the grid is not carried over to the pieces
+    window.cut.mode.setCurrentIndex(1)
+    window.cut.counts[0].setValue(2)
+    window.cut.counts[2].setValue(2)
+    assert len(window.cut.grid_planes) == 2
+    window.cut.apply_btn.click()
+    wait_idle(qtbot, window)
+    assert names(window) == ["ball_x1_z1", "ball_x1_z2", "ball_x2_z1", "ball_x2_z2"]
+    assert all(p.status == "printable" for p in window.parts.parts.values())
+    assert window.cut.grid_planes == [] and window.cut.counts[0].value() == 1
+    window.undo()
+    wait_idle(qtbot, window)
+
+    # curve drawn with clicks in the view
+    window.cut.mode.setCurrentIndex(2)
+    window.viewport.view("front")
+    window._curve_command("draw")
+    p = window.parts.selected()
+    b = np.asarray(p.bounds)
+    c = b.mean(0)
+    for x, z in ((b[0][0] - 2, c[2] - 3), (c[0], c[2] + 4), (b[1][0] + 2, c[2] - 3)):
+        sx, sy = window.viewport.world_to_display([(x, c[1], z)])[0]
+        window._curve_click(sx, sy, False)
+    assert window.cut.curve_info.text() == "3 points"
+    window.cut.apply_btn.click()
+    wait_idle(qtbot, window)
+    assert names(window) == ["ball_A", "ball_B"]
+    vols = [window.parts.parts[k].report for k in window.parts.parts]
+    assert all(r and r["printable"] for r in vols)
+    window.undo()
+    wait_idle(qtbot, window)
+
+    # free-form: raise one control point, cut with a joint gap
+    window.cut.mode.setCurrentIndex(3)
+    qtbot.wait(100)
+    window.cut.set_free_height((1, 1), 4.0)
+    window.cut.gap.setValue(0.1)
+    window.cut.apply_btn.click()
+    wait_idle(qtbot, window)
+    assert names(window) == ["ball_A", "ball_B"]
+    assert all(p.status == "printable" for p in window.parts.parts.values())

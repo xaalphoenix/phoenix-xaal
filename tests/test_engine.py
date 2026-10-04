@@ -146,3 +146,23 @@ def test_engine_transform_on_bed_and_centered(engine, tmp_path, sphere):
     assert abs(lo[2]) < 1e-5 and np.allclose((lo[:2] + hi[:2]) / 2, 0, atol=1e-4)
     # relative placement inside the group is kept
     assert np.isclose(bounds[1, 0, 2] - bounds[0, 0, 2], 30, atol=1e-4)
+
+
+def test_engine_grid_and_surface_cut(engine, tmp_path, sphere):
+    part = load(engine, tmp_path, sphere, "ball")["part"]
+    ev = engine.wait(engine.submit("grid_cut", pid=part["id"], name="ball", planes=[(0, 0.0), (2, 3.0)]))
+    assert ev.kind == "result", ev
+    names = sorted(p["part"]["name"] for p in ev.result["added"])
+    assert names == ["ball_x1_z1", "ball_x1_z2", "ball_x2_z1", "ball_x2_z2"]
+    one = ev.result["added"][0]["part"]
+    frame = {"origin": [0, 0, 0], "u": [1, 0, 0], "v": [0, 1, 0], "w": [0, 0, 1]}
+    heights = np.zeros((3, 3))
+    heights[1, 1] = 3.0
+    ev = engine.wait(engine.submit("surface_cut", pid=part["id"], name="ball", kind="freeform", frame=frame,
+                                   params={"heights": heights.tolist(), "u_range": [-12, 12], "v_range": [-12, 12],
+                                           "res": 32}, gap=0.1))
+    assert ev.kind == "result", ev
+    assert [p["part"]["name"] for p in ev.result["added"]] == ["ball_A", "ball_B"]
+    ev = engine.wait(engine.submit("surface_cut", pid=one["id"], name="q", kind="curve", frame=frame,
+                                   params={"curve": [[-20, 1], [0, 2], [20, 1]]}))
+    assert ev.kind in ("result", "error")

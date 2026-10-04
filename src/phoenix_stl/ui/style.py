@@ -86,6 +86,7 @@ QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
 QStatusBar {{ background: {PANEL}; border-top: 1px solid {BORDER}; }}
 QScrollArea {{ border: none; background: {PANEL}; }}
 QWidget#qt_scrollarea_viewport, QWidget#toolPanel {{ background: {PANEL}; }}
+QWidget#toolFooter {{ background: {PANEL}; border-top: 1px solid {BORDER}; }}
 QLabel#dim {{ color: {TEXT_DIM}; }}
 QLabel#title {{ font-weight: bold; font-size: 11pt; }}
 QFrame#helpPopup {{ background: #24262b; border: 1px solid {ACCENT}; border-radius: 10px; }}

@@ -188,5 +188,60 @@
   "move.apply": {
     "title": "Apply",
     "body": "Applies the move to the full-detail parts. It is also applied automatically when you switch tools. Ctrl+Z undoes it."
+  },
+  "cut.mode": {
+    "title": "Cut type",
+    "body": "Plane: one flat cut. Grid: several planes at once. Curve: along a line you draw. Free-form: along a bendable surface.",
+    "tip": "Curved and free-form seams can follow natural lines of a figure (clothes, hair) so they hide better."
+  },
+  "cut.fit": {
+    "title": "Fit to printer",
+    "body": "Calculates the fewest pieces so every piece fits the chosen printer (with its free margin), also trying a 90° turn on the bed. The planes are spread evenly.",
+    "tip": "Move a plane in the list so the seam avoids faces or fine details."
+  },
+  "cut.grid_planes": {
+    "title": "Planes",
+    "body": "All cutting planes of the grid. Select one to change its position."
+  },
+  "cut.grid_pos": {
+    "title": "Plane position",
+    "body": "Position of the selected plane along its axis, in mm."
+  },
+  "cut.grid_count_help": {
+    "title": "Pieces along an axis",
+    "body": "How many pieces along this axis. The planes are spread evenly; fine-tune them in the list."
+  },
+  "cut.curve_draw": {
+    "title": "Draw the cut line",
+    "body": "Starts drawing: click points on the model in the 3D view. The view switches to a flat projection so the line cuts exactly where you see it.",
+    "tip": "Shift+click for a sharp corner, Backspace removes the last point, Enter finishes."
+  },
+  "cut.curve_undo": {
+    "title": "Remove last point",
+    "body": "Deletes the last point of the line (same as Backspace)."
+  },
+  "cut.curve_smooth": {
+    "title": "Smooth curve",
+    "body": "Draws a smooth curve through the points. Off: straight segments (a stepped or zigzag cut).",
+    "recommended": "On for organic shapes, off for stepped joints."
+  },
+  "cut.free_size": {
+    "title": "Control grid",
+    "body": "Number of control points per side (3×3 to 8×8). More points allow more detailed shapes.",
+    "recommended": "4×4."
+  },
+  "cut.free_height": {
+    "title": "Point height",
+    "body": "How far the selected control point lifts the surface from the base plane, in mm. You can also drag the point in the view.",
+    "tip": "Points only move along the plane's normal, so the two pieces can always be pulled apart."
+  },
+  "cut.free_reset": {
+    "title": "Flatten",
+    "body": "Puts all control points back on the base plane."
+  },
+  "cut.gap": {
+    "title": "Joint gap",
+    "body": "Removes a thin layer between the two pieces of a curved cut so they slide together after printing.",
+    "recommended": "Resin 0.05–0.1 mm, FDM 0.15–0.2 mm. 0 when you will glue the pieces."
   }
 }

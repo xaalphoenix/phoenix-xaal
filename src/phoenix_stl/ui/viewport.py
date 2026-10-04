@@ -6,7 +6,7 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
-from vtkmodules.vtkRenderingCore import vtkCellPicker, vtkPropPicker
+from vtkmodules.vtkRenderingCore import vtkCellPicker, vtkPropPicker, vtkRenderer
 
 from . import style
 
@@ -51,6 +51,11 @@ class Viewport(QWidget):
         self._drag_cb = None
         self._drag = None
         self._pick_cb = None
+        self._click_cb = None  # capture left clicks (drawing)
+        self._handles = None  # {"points", "axis", "on_drag", "on_select", "on_done"}
+        self._handle_drag = None
+        self._overlays: dict[str, object] = {}
+        self._top = None  # renderer drawn over the model (curves and handles stay visible)
 
     # -- info -----------------------------------------------------------------
     def renderer_string(self) -> str:
@@ -64,7 +69,22 @@ class Viewport(QWidget):
 
     def render(self):
         """Request a render; several requests in one event become one frame."""
+        if self._top is not None:
+            self._top.SetActiveCamera(self.plotter.renderer.GetActiveCamera())
         self._render_timer.start()
+
+    def _top_renderer(self):
+        if self._top is None:
+            ren = vtkRenderer()
+            rw = self.plotter.render_window
+            layer = rw.GetNumberOfLayers()
+            rw.SetNumberOfLayers(layer + 1)
+            ren.SetLayer(layer)
+            ren.SetInteractive(0)
+            ren.SetActiveCamera(self.plotter.renderer.GetActiveCamera())
+            rw.AddRenderer(ren)
+            self._top = ren
+        return self._top
 
     # -- parts ------------------------------------------------------------------
     def set_part(self, pid: str, vertices, faces, color: str) -> None:
@@ -158,6 +178,18 @@ class Viewport(QWidget):
                 if pid is not None:
                     cb(pid, np.array(picker.GetPickPosition()), np.array(picker.GetPickNormal()))
             return
+        if self._click_cb is not None:
+            self._click_cb(x, y, bool(self.plotter.iren.interactor.GetShiftKey()))
+            return
+        if self._handles is not None:
+            i = self._nearest_handle(x, y)
+            if i is not None:
+                h = self._handles
+                t0 = self._axis_param(x, y, h["points"][i], h["axis"])
+                self._handle_drag = {"i": i, "t0": t0}
+                if h.get("on_select"):
+                    h["on_select"](i)
+                return
         if self._drag_targets:
             picker = vtkPropPicker()
             if picker.Pick(x, y, 0, self.plotter.renderer):
@@ -173,6 +205,13 @@ class Viewport(QWidget):
         style.OnLeftButtonDown()
 
     def _on_move(self, style, _event):
+        if self._handle_drag is not None:
+            x, y = self.plotter.iren.interactor.GetEventPosition()
+            h, d = self._handles, self._handle_drag
+            t = self._axis_param(x, y, h["points"][d["i"]], h["axis"])
+            if t is not None and d["t0"] is not None and h.get("on_drag"):
+                h["on_drag"](d["i"], t - d["t0"])
+            return
         if self._drag is None:
             style.OnMouseMove()
             return
@@ -187,6 +226,11 @@ class Viewport(QWidget):
             self._drag_cb[0](delta, self._drag["vertical"])
 
     def _on_release(self, style, _event):
+        if self._handle_drag is not None:
+            self._handle_drag = None
+            if self._handles and self._handles.get("on_done"):
+                self._handles["on_done"]()
+            return
         if self._drag is None:
             style.OnLeftButtonUp()
             return
@@ -194,6 +238,112 @@ class Viewport(QWidget):
         self.plotter.interactor.setCursor(Qt.OpenHandCursor)
         if self._drag_cb and self._drag_cb[1]:
             self._drag_cb[1]()
+
+    def set_click_capture(self, callback) -> None:
+        """Left clicks call callback(x, y, shift) instead of orbiting (None: off)."""
+        self._click_cb = callback
+        self._install_mouse()
+        self.plotter.interactor.setCursor(Qt.CrossCursor if callback else Qt.ArrowCursor)
+
+    def set_handles(self, points, axis=None, on_drag=None, on_select=None, on_done=None) -> None:
+        """Draggable handle points; dragging moves along `axis` (None: off)."""
+        if points is None:
+            self._handles = None
+            self.set_overlay("handles", None)
+            return
+        self._handles = {"points": np.asarray(points, float), "axis": np.asarray(axis, float),
+                         "on_drag": on_drag, "on_select": on_select, "on_done": on_done}
+        self._install_mouse()
+
+    def update_handles(self, points, selected=None) -> None:
+        if self._handles is None:
+            return
+        self._handles["points"] = np.asarray(points, float)
+        cloud = pv.PolyData(np.asarray(points, np.float32))
+        colors = np.tile(np.array(pv.Color(style.ACCENT).int_rgb, np.uint8), (len(points), 1))
+        if selected is not None:
+            colors[selected] = (255, 255, 255)
+        cloud["rgb"] = colors
+        self.set_overlay("handles", cloud, on_top=True, scalars="rgb", rgb=True, point_size=14,
+                         render_points_as_spheres=True)
+
+    def display_ray(self, x, y):
+        """World-space (origin, direction) of the mouse ray at display (x, y)."""
+        ren = self.plotter.renderer
+        pts = []
+        for z in (0.0, 1.0):
+            ren.SetDisplayPoint(x, y, z)
+            ren.DisplayToWorld()
+            w = np.array(ren.GetWorldPoint(), float)
+            pts.append(w[:3] / (w[3] or 1.0))
+        return pts[0], pts[1] - pts[0]
+
+    def world_to_display(self, pts) -> np.ndarray:
+        ren = self.plotter.renderer
+        out = []
+        for p in np.asarray(pts, float):
+            ren.SetWorldPoint(*p, 1.0)
+            ren.WorldToDisplay()
+            out.append(ren.GetDisplayPoint()[:2])
+        return np.array(out)
+
+    def camera_frame(self):
+        """(view direction, right, up) of the current camera."""
+        cam = self.plotter.camera
+        d = np.array(cam.focal_point) - np.array(cam.position)
+        d /= np.linalg.norm(d)
+        up = np.array(cam.up)
+        right = np.cross(d, up)
+        right /= np.linalg.norm(right)
+        return d, right, np.cross(right, d)
+
+    def set_parallel(self, on: bool) -> None:
+        if on:
+            self.plotter.enable_parallel_projection()
+        else:
+            self.plotter.disable_parallel_projection()
+        self.render()
+
+    def _nearest_handle(self, x, y, radius: float = 14.0):
+        pts = self._handles["points"]
+        if not len(pts):
+            return None
+        disp = self.world_to_display(pts)
+        d = np.linalg.norm(disp - np.array([x, y]), axis=1)
+        i = int(np.argmin(d))
+        return i if d[i] <= radius else None
+
+    def _axis_param(self, x, y, point, axis):
+        """Parameter along the line point + t*axis closest to the mouse ray."""
+        p0, d = self.display_ray(x, y)
+        a = axis / np.linalg.norm(axis)
+        dn = d / np.linalg.norm(d)
+        w0 = point - p0
+        b = float(a @ dn)
+        denom = 1.0 - b * b
+        if denom < 1e-9:
+            return None
+        return float((b * (dn @ w0) - (a @ w0)) / denom)
+
+    def set_overlay(self, name: str, dataset, on_top: bool = False, **kw) -> None:
+        """Show (or with None remove) a named helper object.
+
+        on_top draws it over the model, so lines and handles behind it stay visible.
+        """
+        old = self._overlays.pop(name, None)
+        if old is not None:
+            self.plotter.remove_actor(old, render=False)
+            if self._top is not None:
+                self._top.RemoveActor(old)
+        if dataset is not None and dataset.n_points:
+            kw.setdefault("pickable", False)
+            kw.setdefault("reset_camera", False)
+            actor = self.plotter.add_mesh(dataset, name=f"overlay-{name}", **kw)
+            if on_top:
+                self.plotter.remove_actor(actor, render=False)
+                self._top_renderer().AddActor(actor)
+            self._overlays[name] = actor
+        self.render()
 
     def _plane_hit(self, x, y):
         """Mouse ray hit on the drag plane (horizontal, or vertical facing the camera)."""

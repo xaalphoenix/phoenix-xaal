@@ -18,6 +18,8 @@ from ..core import hardware
 from ..core.analyze import analyze as _analyze
 from ..core.boolean import NotSolid, union
 from ..core.cut import plane_cut
+from ..core.grid import cell_name, grid_cut
+from ..core.surface_cut import Frame, curve_cutters, cut_with, height_function, heightfield_solid
 from ..core.io_stl import load_stl, save_stl, triangle_count
 from ..core.lod import display_mesh
 from ..core.mesh import Mesh, report
@@ -107,6 +109,56 @@ def op_cut(store, progress, pid: str, name: str, normal, origin, keep: str = "bo
             "open_loops": res.open_loops, "warnings": res.warnings}
 
 
+def op_grid_cut(store, progress, pid: str, name: str, planes: list, preview_faces: int = 2_000_000):
+    """planes: [(axis, position)] -> one part per grid cell."""
+    mesh = store.get(pid)
+    _ensure_memory("cut", 2 * mesh.n_faces)
+    pieces = sorted(grid_cut(mesh, [(int(a), float(p)) for a, p in planes], _sub(progress, 0.0, 0.75)),
+                    key=lambda x: x[0])
+    if len(pieces) < 2:
+        raise EngineError("no_cut")
+    counts = [1 + sum(1 for a, _ in planes if int(a) == k) for k in range(3)]
+    each = max(50_000, preview_faces // len(pieces))
+    added = []
+    for i, (idx, part) in enumerate(pieces):
+        a = 0.75 + 0.25 * i / len(pieces)
+        added.append(_store_new(store, part, cell_name(name, idx, counts), each,
+                                _sub(progress, a, a + 0.25 / len(pieces))))
+    return {"removed": [pid], "added": added}
+
+
+def op_surface_cut(store, progress, pid: str, name: str, kind: str, frame: dict, params: dict,
+                   gap: float = 0.0, keep: str = "both", preview_faces: int = 2_000_000):
+    """Cut along a drawn curve (kind "curve") or a bent surface (kind "freeform")."""
+    mesh = store.get(pid)
+    _ensure_memory("boolean", 2 * mesh.n_faces)
+    fr = Frame(*(np.asarray(frame[k], float) for k in ("origin", "u", "v", "w")))
+    b = mesh.bounds
+    reach = 2.0 * float(np.linalg.norm(b[1] - b[0])) + float(np.linalg.norm((b[0] + b[1]) / 2 - fr.origin))
+    report(progress, 0.05, "Preparing cut")
+    if kind == "curve":
+        ca, cb = curve_cutters(np.asarray(params["curve"], float), fr, reach, gap)
+    else:
+        hf = height_function(np.asarray(params["heights"], float), params["u_range"], params["v_range"])
+        res = int(params.get("res", 96))
+        ca = heightfield_solid(hf, fr, params["u_range"], params["v_range"], reach, res)
+        cb = heightfield_solid(hf, fr, params["u_range"], params["v_range"], reach, res, shift=gap) if gap else ca
+    try:
+        side_a, side_b = cut_with(mesh, ca, cb, _sub(progress, 0.05, 0.75))
+    except NotSolid as e:
+        raise EngineError("not_solid_cut", str(e)) from None
+    sides = [("positive", "A", side_a), ("negative", "B", side_b)]
+    sides = [s for s in sides if s[2].n_faces and keep in ("both", s[0])]
+    if not sides or all(abs(s[2].volume() - mesh.volume()) < 1e-6 * abs(mesh.volume()) for s in sides):
+        raise EngineError("no_cut")
+    added = []
+    for i, (side, tag, part) in enumerate(sides):
+        a = 0.75 + 0.25 * i / len(sides)
+        added.append(_store_new(store, part, f"{name}_{tag}", preview_faces,
+                                _sub(progress, a, a + 0.25 / len(sides)), side=side))
+    return {"removed": [pid], "added": added, "open_loops": 0, "loops": 0, "warnings": []}
+
+
 def op_transform(store, progress, items: list, on_bed: bool = False, centered: bool = False):
     """items: [(pid, name, 4x4 matrix)] -> each part replaced by its moved copy.
 
@@ -193,6 +245,8 @@ OPS = {
     "analyze": op_analyze,
     "repair": op_repair,
     "cut": op_cut,
+    "grid_cut": op_grid_cut,
+    "surface_cut": op_surface_cut,
     "transform": op_transform,
     "merge": op_merge,
     "restore": op_restore,

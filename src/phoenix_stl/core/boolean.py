@@ -23,8 +23,9 @@ class NotSolid(Exception):
 
 
 def to_manifold(mesh: Mesh) -> m3d.Manifold:
-    man = m3d.Manifold(m3d.Mesh(vert_properties=np.ascontiguousarray(mesh.vertices, dtype=np.float32),
-                                tri_verts=np.ascontiguousarray(mesh.faces, dtype=np.uint32)))
+    # Fresh owned copies: manifold3d rejects views into other buffers.
+    man = m3d.Manifold(m3d.Mesh(vert_properties=np.array(mesh.vertices, dtype=np.float32, order="C"),
+                                tri_verts=np.array(mesh.faces, dtype=np.uint32, order="C")))
     if man.status() != m3d.Error.NoError:
         raise NotSolid(str(man.status()))
     return man

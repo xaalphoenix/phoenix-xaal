@@ -5,18 +5,23 @@ import os
 import re
 
 import numpy as np
+import pyvista as pv
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QStyle,
-                               QTabWidget, QWidget)
+                               QTabWidget, QVBoxLayout, QWidget)
 from scipy.spatial.transform import Rotation
 
 from .. import APP_NAME, __version__
 from ..core import hardware
 from ..core.cut import section_segments
+from ..core.grid import fit_planes
+from ..core.surface_cut import (Frame, height_function, heightfield_values, level_segments,
+                                smooth_curve)
 from ..core.mesh import Mesh
 from ..core.transform import rotation_to, transform_points, translation
+from . import style
 from .engine_bridge import EngineBridge
 from .help_hover import HoverHelp
 from .history import History, Step, snapshot
@@ -31,12 +36,23 @@ from .viewport import Viewport
 MIN_PREVIEW = 300_000
 
 
-def _scroll(widget: QWidget) -> QScrollArea:
+def _scroll(widget: QWidget) -> QWidget:
+    """Scrollable tool page; a panel's `footer` (apply buttons) stays visible below it."""
     area = QScrollArea()
     area.setWidgetResizable(True)
     widget.setObjectName("toolPanel")
     area.setWidget(widget)
-    return area
+    footer = getattr(widget, "footer", None)
+    if footer is None:
+        return area
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    lay.addWidget(area, 1)
+    footer.setObjectName("toolFooter")
+    lay.addWidget(footer)
+    return page
 
 
 def safe_filename(name: str) -> str:
@@ -64,6 +80,8 @@ class MainWindow(QMainWindow):
         self._last_msg = ("progress.idle", {})
         self._pending = None  # move tool session: {"pids", "center", "matrix"}
         self._drag_base = None
+        self._curve = None  # curve drawing: {"frame", "points", "corners", "drawing"}
+        self._free = None  # free-form session: {"frame", "u_range", "v_range", "base"}
 
         self.viewport = Viewport(self)
         self.setCentralWidget(self.viewport)
@@ -93,13 +111,19 @@ class MainWindow(QMainWindow):
         self.tools_dock.setMinimumWidth(340)
         self.addDockWidget(Qt.RightDockWidgetArea, self.tools_dock)
 
-        self._build_status()
-        self._build_actions()
-        self._connect()
         self._section_timer = QTimer(self)
         self._section_timer.setSingleShot(True)
         self._section_timer.setInterval(25)
         self._section_timer.timeout.connect(self._update_section)
+        self._overlay_timer = QTimer(self)
+        self._overlay_timer.setSingleShot(True)
+        self._overlay_timer.setInterval(30)
+        self._overlay_timer.timeout.connect(self._update_mode_preview)
+        QShortcut(QKeySequence(Qt.Key_Backspace), self, lambda: self._curve_command("undo"))
+        QShortcut(QKeySequence(Qt.Key_Return), self, lambda: self._curve_command("stop"))
+        self._build_status()
+        self._build_actions()
+        self._connect()
         self._pending_plane = None
         self._current_tab = self.tabs.currentIndex()
         i18n().changed.connect(self.retranslate)
@@ -219,6 +243,12 @@ class MainWindow(QMainWindow):
         self.cut.plane_changed.connect(self._plane_changed)
         self.cut.gizmo_toggled.connect(lambda _: self._update_tool_overlays())
         self.cut.apply_requested.connect(self.cut_selected)
+        self.cut.apply_mode_requested.connect(self.cut_mode_selected)
+        self.cut.mode_changed.connect(lambda _: self._update_tool_overlays())
+        self.cut.grid_changed.connect(self._overlay_timer.start)
+        self.cut.freeform_changed.connect(self._overlay_timer.start)
+        self.cut.fit_requested.connect(self._fit_to_printer)
+        self.cut.curve_command.connect(self._curve_command)
         self.viewport.plane_moved.connect(self.cut.set_from_handle)
         self.move.changed.connect(self._update_move_preview)
         self.move.apply_requested.connect(lambda: self.commit_move())
@@ -780,6 +810,10 @@ class MainWindow(QMainWindow):
         p = self.parts.selected()
         if p is None:
             return
+        if self._tab_is(self.cut) and self.cut.current_mode() == "freeform":
+            self._free = None
+            self._overlay_timer.start()
+            return
         if self._tab_is(self.cut) and self.cut.gizmo.isChecked():
             self.viewport.set_plane(normal, origin)
         self._pending_plane = (normal, origin)
@@ -787,7 +821,8 @@ class MainWindow(QMainWindow):
 
     def _update_section(self):
         p = self.parts.selected()
-        if p is None or self._pending_plane is None or not self._tab_is(self.cut):
+        if (p is None or self._pending_plane is None or not self._tab_is(self.cut)
+                or self.cut.current_mode() != "plane"):
             self.viewport.set_section(None)
             return
         n, o = self._pending_plane
@@ -795,7 +830,16 @@ class MainWindow(QMainWindow):
 
     def _update_tool_overlays(self):
         p = self.parts.selected()
-        if p is not None and self._tab_is(self.cut):
+        mode = self.cut.current_mode()
+        on_cut = p is not None and self._tab_is(self.cut)
+        if not (on_cut and mode == "curve"):
+            self._stop_curve_drawing()
+        if not (on_cut and mode == "freeform"):
+            self.viewport.set_handles(None)
+            self._free = None
+        for name in ("grid_planes", "curve", "curve_pts", "ribbon", "free_surface"):
+            self.viewport.set_overlay(name, None)
+        if on_cut and mode == "plane":
             n, o = self.cut.normal(), self.cut.origin()
             if self.cut.gizmo.isChecked():
                 b = np.asarray(p.bounds)
@@ -809,6 +853,265 @@ class MainWindow(QMainWindow):
             self._section_timer.start()
         else:
             self.viewport.hide_plane()
+            if on_cut:
+                self._update_mode_preview()
+
+    def _update_mode_preview(self):
+        p = self.parts.selected()
+        if p is None or not self._tab_is(self.cut):
+            return
+        mode = self.cut.current_mode()
+        if mode == "grid":
+            self._update_grid_preview(p)
+        elif mode == "curve":
+            self._update_curve_preview(p)
+        elif mode == "freeform":
+            self._update_freeform_preview(p)
+
+    # -- grid cut ---------------------------------------------------------------------
+    def _update_grid_preview(self, p: Part):
+        planes = self.cut.grid_planes
+        b = np.asarray(p.bounds)
+        size = b[1] - b[0]
+        segs, quads = [], []
+        for axis, pos in planes:
+            normal = np.eye(3)[axis]
+            origin = (b[0] + b[1]) / 2
+            origin[axis] = pos
+            segs.append(section_segments(p.preview, normal, origin))
+            others = [k for k in range(3) if k != axis]
+            quads.append(pv.Plane(center=origin, direction=normal, i_size=size[others[1]] * 1.1 + 1,
+                                  j_size=size[others[0]] * 1.1 + 1))
+        self.viewport.set_section(np.concatenate(segs) if segs else None)
+        merged = pv.merge(quads) if quads else None
+        self.viewport.set_overlay("grid_planes", merged, color=style.ACCENT, opacity=0.18, show_edges=False)
+        if not planes:
+            self.cut.set_grid_info(t("cut.grid_none"))
+            return
+        # largest piece vs printer
+        biggest = []
+        for k in range(3):
+            cuts = sorted([b[0][k]] + [q for a, q in planes if a == k] + [b[1][k]])
+            biggest.append(max(np.diff(cuts)))
+        n_pieces = int(np.prod([1 + sum(1 for a, _ in planes if a == k) for k in range(3)]))
+        fit = fit_state(biggest, self.parts.printer_volume())
+        n = i18n().num
+        self.cut.set_grid_info(t("cut.grid_info", n=n_pieces, x=n(biggest[0], "{:.1f}"),
+                                 y=n(biggest[1], "{:.1f}"), z=n(biggest[2], "{:.1f}"),
+                                 fit=t("printer." + fit)))
+
+    def _fit_to_printer(self):
+        p = self.parts.selected()
+        if p is None:
+            return
+        printer = self.parts.current_printer()
+        planes, counts, rotated = fit_planes(p.bounds, printer.volume, printer.margin)
+        self.cut.set_grid_planes(planes, counts)
+        self.status("cut.fit_done", n=int(np.prod(counts)))
+
+    # -- curve cut --------------------------------------------------------------------
+    def _curve_command(self, cmd: str):
+        p = self.parts.selected()
+        if p is None or not self._tab_is(self.cut) or self.cut.current_mode() != "curve":
+            return
+        if cmd == "draw":
+            if self._curve and self._curve["drawing"]:
+                self._stop_curve_drawing()
+            else:
+                d, right, up = self.viewport.camera_frame()
+                b = np.asarray(p.bounds)
+                frame = Frame((b[0] + b[1]) / 2, right, np.cross(d, right), d)
+                self._curve = {"frame": frame, "points": [], "corners": set(), "drawing": True}
+                self.viewport.set_parallel(True)
+                self.viewport.set_click_capture(self._curve_click)
+        elif cmd == "stop":
+            self._stop_curve_drawing()
+        elif cmd == "undo" and self._curve and self._curve["points"]:
+            self._curve["points"].pop()
+            self._curve["corners"].discard(len(self._curve["points"]))
+        self._refresh_curve_ui()
+        self._overlay_timer.start()
+
+    def _stop_curve_drawing(self):
+        if self._curve and self._curve["drawing"]:
+            self._curve["drawing"] = False
+            self.viewport.set_click_capture(None)
+            self.viewport.set_parallel(False)
+        self._refresh_curve_ui()
+
+    def _refresh_curve_ui(self):
+        c = self._curve
+        self.cut.set_curve_info(len(c["points"]) if c else 0, bool(c and c["drawing"]))
+
+    def _curve_click(self, x, y, shift):
+        c = self._curve
+        if not c:
+            return
+        p0, d = self.viewport.display_ray(x, y)
+        fr = c["frame"]
+        denom = float(d @ fr.w)
+        if abs(denom) < 1e-12:
+            return
+        hit = p0 + d * (float((fr.origin - p0) @ fr.w) / denom)
+        loc = fr.to_local(hit[None])[0]
+        if shift:
+            c["corners"].add(len(c["points"]))
+        c["points"].append((float(loc[0]), float(loc[1])))
+        self._refresh_curve_ui()
+        self._overlay_timer.start()
+
+    def _curve_polyline(self):
+        c = self._curve
+        if not c or len(c["points"]) < 2:
+            return None
+        pts = np.array(c["points"], float)
+        return smooth_curve(pts, c["corners"]) if self.cut.smooth.isChecked() and len(pts) >= 3 else pts
+
+    def _update_curve_preview(self, p: Part):
+        c = self._curve
+        self.viewport.set_section(None)
+        if not c or not c["points"]:
+            for name in ("curve", "curve_pts", "ribbon"):
+                self.viewport.set_overlay(name, None)
+            return
+        fr = c["frame"]
+        pts3 = fr.to_world(np.c_[np.array(c["points"]), np.zeros(len(c["points"]))])
+        self.viewport.set_overlay("curve_pts", pv.PolyData(pts3.astype(np.float32)), on_top=True, color="white",
+                                  point_size=10, render_points_as_spheres=True)
+        line = self._curve_polyline()
+        if line is None:
+            return
+        b = np.asarray(p.bounds)
+        L = float(np.linalg.norm(b[1] - b[0]))
+        t0, t1 = line[1] - line[0], line[-1] - line[-2]
+        ext = np.vstack([line[0] - t0 / np.linalg.norm(t0) * L, line, line[-1] + t1 / np.linalg.norm(t1) * L])
+        top = fr.to_world(np.c_[ext, np.full(len(ext), L)])
+        bot = fr.to_world(np.c_[ext, np.full(len(ext), -L)])
+        n = len(ext)
+        verts = np.vstack([top, bot]).astype(np.float32)
+        i = np.arange(n - 1)
+        faces = np.concatenate([np.stack([i, i + 1, i + n + 1], 1), np.stack([i, i + n + 1, i + n], 1)])
+        self.viewport.set_overlay("ribbon", pv.PolyData.from_regular_faces(verts, faces), color=style.ACCENT,
+                                  opacity=0.3)
+        line3 = fr.to_world(np.c_[line, np.zeros(len(line))]).astype(np.float32)
+        self.viewport.set_overlay("curve", pv.lines_from_points(line3), on_top=True, color=style.ACCENT,
+                                  line_width=4)
+
+    # -- free-form cut ------------------------------------------------------------------
+    def _free_session(self, p: Part):
+        if self._free is not None and self._free["k"] != self.cut.heights.shape[0]:
+            self._free = None
+        if self._free is None:
+            fr = Frame.from_normal(self.cut.origin(), self.cut.normal())
+            b = np.asarray(p.bounds)
+            corners = np.array([[b[i][0], b[j][1], b[k][2]] for i in (0, 1) for j in (0, 1) for k in (0, 1)])
+            loc = fr.to_local(corners)
+            pad = 0.05 * float(np.ptp(loc[:, :2], axis=0).max())
+            self._free = {"frame": fr, "u_range": (loc[:, 0].min() - pad, loc[:, 0].max() + pad),
+                          "v_range": (loc[:, 1].min() - pad, loc[:, 1].max() + pad), "base": None,
+                          "k": self.cut.heights.shape[0]}
+            self.viewport.set_handles(self._free_points(), fr.w, on_drag=self._free_drag,
+                                      on_select=self._free_select, on_done=self._free_drag_done)
+        return self._free
+
+    def _free_points(self):
+        f = self._free
+        h = self.cut.heights
+        k = h.shape[0]
+        us = np.linspace(*f["u_range"], k)
+        vs = np.linspace(*f["v_range"], k)
+        U, V = np.meshgrid(us, vs, indexing="ij")
+        return f["frame"].to_world(np.stack([U, V, h], -1).reshape(-1, 3))
+
+    def _update_freeform_preview(self, p: Part):
+        f = self._free_session(p)
+        h = self.cut.heights
+        hf = height_function(h, f["u_range"], f["v_range"])
+        res = 40
+        us = np.linspace(*f["u_range"], res)
+        vs = np.linspace(*f["v_range"], res)
+        U, V = np.meshgrid(us, vs, indexing="ij")
+        verts = f["frame"].to_world(np.stack([U, V, hf(U, V)], -1).reshape(-1, 3)).astype(np.float32)
+        idx = np.arange(res * res).reshape(res, res)
+        a, b2, c, d = idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:], idx[:-1, 1:]
+        faces = np.concatenate([np.stack([a, b2, c], -1).reshape(-1, 3), np.stack([a, c, d], -1).reshape(-1, 3)])
+        self.viewport.set_overlay("free_surface", pv.PolyData.from_regular_faces(verts, faces),
+                                  color=style.ACCENT, opacity=0.28)
+        sel = self.cut.free_selected
+        k = h.shape[0]
+        self.viewport.update_handles(self._free_points(), None if sel is None else sel[0] * k + sel[1])
+        vals = heightfield_values(p.preview.vertices, f["frame"], hf)
+        self.viewport.set_section(level_segments(p.preview, vals))
+
+    def _free_select(self, i):
+        k = self.cut.heights.shape[0]
+        ij = divmod(i, k)
+        self.cut.select_free_point(ij)
+        self._free["base"] = float(self.cut.heights[ij])
+        self._overlay_timer.start()
+
+    def _free_drag(self, i, delta):
+        k = self.cut.heights.shape[0]
+        ij = divmod(i, k)
+        base = self._free.get("base") or 0.0
+        self.cut.set_free_height(ij, base + delta)
+
+    def _free_drag_done(self):
+        self._free["base"] = None
+
+    # -- applying the other cut modes ------------------------------------------------------
+    def cut_mode_selected(self, mode: str):
+        p = self.parts.selected()
+        if p is None:
+            return
+        gap, keep = self.cut.gap.value(), self.cut.keep.currentData()
+        if mode == "grid":
+            if not self.cut.grid_planes:
+                QMessageBox.information(self, APP_NAME, t("cut.grid_empty"))
+                return
+            self.engine.submit("grid_cut", tag={"pid": p.id}, pid=p.id, name=p.name,
+                               planes=self.cut.grid_planes, preview_faces=self.preview_faces(4))
+        elif mode == "curve":
+            line = self._curve_polyline()
+            if line is None:
+                QMessageBox.information(self, APP_NAME, t("cut.curve_empty"))
+                return
+            fr = self._curve["frame"]
+            self._stop_curve_drawing()
+            self.engine.submit("surface_cut", tag={"pid": p.id}, pid=p.id, name=p.name, kind="curve",
+                               frame=self._frame_dict(fr), params={"curve": line.tolist()}, gap=gap, keep=keep,
+                               preview_faces=self.preview_faces(1))
+        elif mode == "freeform":
+            f = self._free_session(p)
+            self.engine.submit("surface_cut", tag={"pid": p.id}, pid=p.id, name=p.name, kind="freeform",
+                               frame=self._frame_dict(f["frame"]),
+                               params={"heights": self.cut.heights.tolist(), "u_range": list(f["u_range"]),
+                                       "v_range": list(f["v_range"]), "res": 128},
+                               gap=gap, keep=keep, preview_faces=self.preview_faces(1))
+
+    @staticmethod
+    def _frame_dict(fr: Frame) -> dict:
+        return {k: np.asarray(getattr(fr, k), float).tolist() for k in ("origin", "u", "v", "w")}
+
+    def _done_grid_cut(self, job, r):
+        parent = self.parts.parts.get(r["removed"][0]) if r["removed"] else None
+        inherit = parent is not None and parent.status == "printable"
+        self.cut.set_grid_planes([], (1, 1, 1), emit=False)  # don't carry the grid over to the pieces
+        new = self._apply_change(r, "action.cut", lambda i, item, old: {
+            "status": "printable" if inherit else "unknown"})
+        if not inherit:
+            for p in new:
+                self._analyze(p)
+        self.status("cut.done", n=len(new))
+
+    def _done_surface_cut(self, job, r):
+        new = self._apply_change(r, "action.cut", lambda i, item, old: {
+            "color": old[0].color if (old and i == 0) else None})
+        self._curve = None
+        self._refresh_curve_ui()
+        for p in new:
+            self._analyze(p)
+        self.status("cut.done", n=len(new))
 
     def _volume_toggled(self, on):
         self.a_volume.setChecked(on)

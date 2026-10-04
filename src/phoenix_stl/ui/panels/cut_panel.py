@@ -6,13 +6,14 @@ import math
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout,
-                               QWidget)
+                               QGroupBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QSlider, QSpinBox,
+                               QVBoxLayout, QWidget)
 
 from ..i18n import t
 
 AXES = ("x", "y", "z")
 SLIDER_STEPS = 1000
+MODES = ("plane", "grid", "curve", "freeform")
 
 
 def normal_from(axis: int, tilt1: float, tilt2: float) -> np.ndarray:
@@ -37,7 +38,13 @@ def tilts_from(axis: int, n) -> tuple[float, float]:
 class CutPanel(QWidget):
     plane_changed = Signal(object, object)  # normal, origin
     gizmo_toggled = Signal(bool)
-    apply_requested = Signal(object, object, str)  # normal, origin, keep
+    apply_requested = Signal(object, object, str)  # normal, origin, keep (plane mode)
+    apply_mode_requested = Signal(str)  # grid / curve / freeform
+    mode_changed = Signal(str)
+    grid_changed = Signal()
+    fit_requested = Signal()
+    curve_command = Signal(str)  # "draw", "undo", "clear"
+    freeform_changed = Signal()
 
     def __init__(self, help_register, parent=None):
         super().__init__(parent)
@@ -53,6 +60,19 @@ class CutPanel(QWidget):
         self.target.setObjectName("title")
         self.target.setWordWrap(True)
         lay.addWidget(self.target)
+
+        mode_row = QFormLayout()
+        self.mode = QComboBox()
+        for m in MODES:
+            self.mode.addItem("", m)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self.mode_label = QLabel()
+        mode_row.addRow(self.mode_label, self.mode)
+        lay.addLayout(mode_row)
+        self.mode_hint = QLabel()
+        self.mode_hint.setWordWrap(True)
+        self.mode_hint.setObjectName("dim")
+        lay.addWidget(self.mode_hint)
 
         self.plane_box = QGroupBox()
         form = QFormLayout(self.plane_box)
@@ -92,6 +112,93 @@ class CutPanel(QWidget):
         form.addRow("", self.center_btn)
         lay.addWidget(self.plane_box)
 
+        # grid mode
+        self.grid_box = QGroupBox()
+        gf = QFormLayout(self.grid_box)
+        self.counts = []
+        for a in AXES:
+            sp = QSpinBox()
+            sp.setRange(1, 30)
+            sp.valueChanged.connect(self._counts_changed)
+            self.counts.append(sp)
+            gf.addRow(QLabel(t("cut.grid_count", axis=a.upper())), sp)
+        self.count_labels = [gf.labelForField(sp) for sp in self.counts]
+        self.fit_btn = QPushButton()
+        self.fit_btn.clicked.connect(self.fit_requested)
+        gf.addRow(self.fit_btn)
+        self.plane_list = QListWidget()
+        self.plane_list.setMaximumHeight(130)
+        self.plane_list.currentRowChanged.connect(self._plane_row)
+        gf.addRow(self.plane_list)
+        self.plane_pos = self._spin(-1e5, 1e5, 0.5, 2, " mm")
+        self.plane_pos.valueChanged.connect(self._plane_pos_changed)
+        self.plane_pos_label = QLabel()
+        gf.addRow(self.plane_pos_label, self.plane_pos)
+        self.grid_info = QLabel()
+        self.grid_info.setWordWrap(True)
+        self.grid_info.setObjectName("dim")
+        gf.addRow(self.grid_info)
+        lay.addWidget(self.grid_box)
+        self.grid_planes: list[tuple[int, float]] = []
+
+        # curve mode
+        self.curve_box = QGroupBox()
+        cf = QVBoxLayout(self.curve_box)
+        row = QHBoxLayout()
+        self.draw_btn = QPushButton()
+        self.draw_btn.clicked.connect(lambda: self.curve_command.emit("draw"))
+        self.undo_pt_btn = QPushButton()
+        self.undo_pt_btn.clicked.connect(lambda: self.curve_command.emit("undo"))
+        row.addWidget(self.draw_btn, 1)
+        row.addWidget(self.undo_pt_btn)
+        cf.addLayout(row)
+        self.smooth = QCheckBox()
+        self.smooth.setChecked(True)
+        self.smooth.toggled.connect(lambda _: self.curve_command.emit("redraw"))
+        cf.addWidget(self.smooth)
+        self.curve_info = QLabel()
+        self.curve_info.setObjectName("dim")
+        self.curve_info.setWordWrap(True)
+        cf.addWidget(self.curve_info)
+        lay.addWidget(self.curve_box)
+
+        # free-form mode (uses the plane above as its base)
+        self.free_box = QGroupBox()
+        ff = QFormLayout(self.free_box)
+        self.free_size = QSpinBox()
+        self.free_size.setRange(3, 8)
+        self.free_size.setValue(4)
+        self.free_size.valueChanged.connect(self._free_size_changed)
+        self.free_size_label = QLabel()
+        ff.addRow(self.free_size_label, self.free_size)
+        self.free_point = QLabel()
+        ff.addRow(self.free_point)
+        self.free_height = self._spin(-1e4, 1e4, 0.5, 2, " mm")
+        self.free_height.valueChanged.connect(self._free_height_changed)
+        self.free_height_label = QLabel()
+        ff.addRow(self.free_height_label, self.free_height)
+        self.free_reset = QPushButton()
+        self.free_reset.clicked.connect(self._free_reset)
+        ff.addRow(self.free_reset)
+        lay.addWidget(self.free_box)
+        self.heights = np.zeros((4, 4))
+        self.free_selected = None
+
+        lay.addStretch(1)
+
+        # footer: shown below the scroll area so Cut is always reachable
+        self.footer = QWidget()
+        foot = QVBoxLayout(self.footer)
+        foot.setContentsMargins(10, 6, 10, 10)
+        gap_row = QFormLayout()
+        gap_row.setContentsMargins(0, 0, 0, 0)
+        self.gap = self._spin(0, 2, 0.01, 2, " mm")
+        self.gap_label = QLabel()
+        gap_row.addRow(self.gap_label, self.gap)
+        self.gap_widget = QWidget()
+        self.gap_widget.setLayout(gap_row)
+        foot.addWidget(self.gap_widget)
+
         opts = QFormLayout()
         self.keep = QComboBox()
         self.keep_label = QLabel()
@@ -100,24 +207,30 @@ class CutPanel(QWidget):
         self.gizmo.setChecked(True)
         self.gizmo.toggled.connect(self.gizmo_toggled)
         opts.addRow(self.gizmo)
-        lay.addLayout(opts)
+        foot.addLayout(opts)
 
         self.apply_btn = QPushButton()
         self.apply_btn.setObjectName("primary")
         self.apply_btn.clicked.connect(self._apply)
-        lay.addWidget(self.apply_btn)
-        lay.addStretch(1)
+        foot.addWidget(self.apply_btn)
 
         for w, k in ((self.axis_buttons[0], "cut.axis"), (self.axis_buttons[1], "cut.axis"),
                      (self.axis_buttons[2], "cut.axis"), (self.tilt1, "cut.tilt1"),
                      (self.tilt2, "cut.tilt2"), (self.offset, "cut.offset"), (self.slider, "cut.offset"),
                      (self.center_btn, "cut.center"), (self.keep, "cut.keep"),
-                     (self.gizmo, "cut.gizmo"), (self.apply_btn, "cut.apply")):
+                     (self.gizmo, "cut.gizmo"), (self.apply_btn, "cut.apply"), (self.mode, "cut.mode"),
+                     (self.fit_btn, "cut.fit"), (self.plane_list, "cut.grid_planes"),
+                     (self.plane_pos, "cut.grid_pos"), (self.draw_btn, "cut.curve_draw"),
+                     (self.undo_pt_btn, "cut.curve_undo"), (self.smooth, "cut.curve_smooth"),
+                     (self.free_size, "cut.free_size"), (self.free_height, "cut.free_height"),
+                     (self.free_reset, "cut.free_reset"), (self.gap, "cut.gap")) + tuple(
+                        (sp, "cut.grid_count_help") for sp in self.counts):
             help_register(w, k)
         for s in (self.tilt1, self.tilt2, self.offset):
             s.valueChanged.connect(self._fields_changed)
         self.retranslate()
         self.set_part(None)
+        self._mode_changed()
 
     def _spin(self, lo, hi, step, decimals, suffix):
         s = QDoubleSpinBox()
@@ -144,15 +257,18 @@ class CutPanel(QWidget):
         has = name is not None
         self._name = name
         self.target.setText(f"{t('cut.target')}: {name}" if has else t("cut.none"))
-        for w in (self.plane_box, self.keep, self.gizmo, self.apply_btn):
+        for w in (self.plane_box, self.keep, self.gizmo, self.apply_btn, self.grid_box, self.curve_box,
+                  self.free_box):
             w.setEnabled(has)
         if not has:
             self._preview_pts = None
             return
         b = np.asarray(bounds, float)
+        self._bounds = b
         self._center = (b[0] + b[1]) / 2
         self._preview_pts = np.asarray(preview_vertices, dtype=np.float32)
         self._update_range(keep_value=False)
+        self._counts_changed()
         self._emit()
 
     def set_busy(self, busy: bool) -> None:
@@ -225,8 +341,112 @@ class CutPanel(QWidget):
         if self._preview_pts is not None:
             self.plane_changed.emit(self.normal(), self.origin())
 
+    def current_mode(self) -> str:
+        return self.mode.currentData() or "plane"
+
     def _apply(self):
-        self.apply_requested.emit(self.normal(), self.origin(), self.keep.currentData())
+        if self.current_mode() == "plane":
+            self.apply_requested.emit(self.normal(), self.origin(), self.keep.currentData())
+        else:
+            self.apply_mode_requested.emit(self.current_mode())
+
+    def _mode_changed(self, *_):
+        m = self.current_mode()
+        self.plane_box.setVisible(m in ("plane", "freeform"))
+        self.gizmo.setVisible(m == "plane")
+        self.grid_box.setVisible(m == "grid")
+        self.curve_box.setVisible(m == "curve")
+        self.free_box.setVisible(m == "freeform")
+        self.gap_widget.setVisible(m in ("curve", "freeform"))
+        self.keep.setEnabled(m != "grid")
+        self.mode_hint.setText(t("cut.hint_" + m))
+        self.mode_changed.emit(m)
+
+    # -- grid --------------------------------------------------------------------
+    def _counts_changed(self, *_):
+        if getattr(self, "_bounds", None) is None:
+            return
+        from ...core.grid import even_planes
+        b = self._bounds
+        planes = [(k, p) for k in range(3) for p in even_planes(b[0][k], b[1][k], self.counts[k].value())]
+        self.set_grid_planes(planes, emit=True)
+
+    def set_grid_planes(self, planes, counts=None, emit: bool = True) -> None:
+        self.grid_planes = [(int(a), float(p)) for a, p in planes]
+        if counts is not None:
+            for sp, c in zip(self.counts, counts):
+                sp.blockSignals(True)
+                sp.setValue(int(c))
+                sp.blockSignals(False)
+        self.plane_list.blockSignals(True)
+        self.plane_list.clear()
+        for a, p in self.grid_planes:
+            self.plane_list.addItem(f"{AXES[a].upper()}  {p:.2f} mm")
+        self.plane_list.blockSignals(False)
+        self.plane_pos.setEnabled(False)
+        if emit:
+            self.grid_changed.emit()
+
+    def set_grid_info(self, text: str) -> None:
+        self.grid_info.setText(text)
+
+    def _plane_row(self, row: int):
+        ok = 0 <= row < len(self.grid_planes)
+        self.plane_pos.setEnabled(ok)
+        if ok:
+            self.plane_pos.blockSignals(True)
+            self.plane_pos.setValue(self.grid_planes[row][1])
+            self.plane_pos.blockSignals(False)
+
+    def _plane_pos_changed(self, value):
+        row = self.plane_list.currentRow()
+        if 0 <= row < len(self.grid_planes):
+            a = self.grid_planes[row][0]
+            self.grid_planes[row] = (a, float(value))
+            self.plane_list.item(row).setText(f"{AXES[a].upper()}  {value:.2f} mm")
+            self.grid_changed.emit()
+
+    # -- curve ---------------------------------------------------------------------
+    def set_curve_info(self, n_points: int, drawing: bool) -> None:
+        self.curve_info.setText(t("cut.curve_info", n=n_points))
+        self.draw_btn.setText(t("cut.curve_stop") if drawing else t("cut.curve_draw"))
+        self.undo_pt_btn.setEnabled(n_points > 0)
+
+    # -- free-form -----------------------------------------------------------------
+    def _free_size_changed(self, k):
+        self.heights = np.zeros((k, k))
+        self.select_free_point(None)
+        self.freeform_changed.emit()
+
+    def _free_reset(self):
+        self.heights[:] = 0.0
+        self.select_free_point(self.free_selected)
+        self.freeform_changed.emit()
+
+    def select_free_point(self, ij) -> None:
+        self.free_selected = ij
+        self.free_height.setEnabled(ij is not None)
+        self.free_height.blockSignals(True)
+        if ij is not None:
+            self.free_height.setValue(float(self.heights[ij]))
+            self.free_point.setText(t("cut.free_point", i=ij[0] + 1, j=ij[1] + 1))
+        else:
+            self.free_height.setValue(0.0)
+            self.free_point.setText(t("cut.free_none"))
+        self.free_height.blockSignals(False)
+
+    def set_free_height(self, ij, value: float) -> None:
+        self.heights[ij] = value
+        if ij == self.free_selected:
+            self.free_height.blockSignals(True)
+            self.free_height.setValue(float(value))
+            self.free_height.blockSignals(False)
+        self.freeform_changed.emit()
+
+    def _free_height_changed(self, value):
+        if self.free_selected is not None:
+            self.heights[self.free_selected] = value
+            self.freeform_changed.emit()
 
     def retranslate(self):
         self.plane_box.setTitle(t("cut.plane"))
@@ -247,4 +467,22 @@ class CutPanel(QWidget):
         self.keep.blockSignals(False)
         self.gizmo.setText(t("cut.gizmo"))
         self.apply_btn.setText(t("cut.apply"))
+        self.mode_label.setText(t("cut.mode"))
+        for i, m in enumerate(MODES):
+            self.mode.setItemText(i, t("cut.mode_" + m))
+        self.mode_hint.setText(t("cut.hint_" + self.current_mode()))
+        self.grid_box.setTitle(t("cut.mode_grid"))
+        for lab, a in zip(self.count_labels, AXES):
+            lab.setText(t("cut.grid_count", axis=a.upper()))
+        self.fit_btn.setText(t("cut.fit_btn"))
+        self.plane_pos_label.setText(t("cut.grid_pos"))
+        self.curve_box.setTitle(t("cut.mode_curve"))
+        self.smooth.setText(t("cut.curve_smooth"))
+        self.undo_pt_btn.setText(t("cut.curve_undo"))
+        self.free_box.setTitle(t("cut.mode_freeform"))
+        self.free_size_label.setText(t("cut.free_size"))
+        self.free_height_label.setText(t("cut.free_height"))
+        self.free_reset.setText(t("cut.free_reset"))
+        self.gap_label.setText(t("cut.gap"))
+        self.select_free_point(self.free_selected)
         self.target.setText(f"{t('cut.target')}: {self._name}" if self._name else t("cut.none"))
