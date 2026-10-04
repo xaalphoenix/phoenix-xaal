@@ -49,11 +49,11 @@ def run() -> int:
         t = time.time()
         ev = eng.wait(eng.submit("load", path=src, preview_faces=1000))
         assert ev.kind == "result", ev
-        part = ev.result["part"]
+        part = ev.result["added"][0]["part"]
         ev = eng.wait(eng.submit("cut", pid=part["id"], name="sphere", normal=(0.2, 0.1, 1), origin=(0, 0, 1)))
-        assert ev.kind == "result" and len(ev.result["parts"]) == 2, ev
+        assert ev.kind == "result" and len(ev.result["added"]) == 2, ev
         outs = []
-        for p in ev.result["parts"]:
+        for p in ev.result["added"]:
             a = eng.wait(eng.submit("analyze", pid=p["part"]["id"]))
             assert a.result["report"]["printable"], a.result
             outs.append((p["part"]["id"], os.path.join(tmp, p["part"]["name"] + ".stl")))

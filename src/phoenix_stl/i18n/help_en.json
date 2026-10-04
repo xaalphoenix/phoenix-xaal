@@ -127,5 +127,66 @@
     "title": "Warn before exporting",
     "body": "Asks before saving parts that haven't passed the printable check.",
     "recommended": "On."
+  },
+  "printer.edit": {
+    "title": "Edit printers",
+    "body": "Add your own printers with their build volume, type (resin or FDM) and the free margin kept around parts.",
+    "tip": "The type sets the default pin and joint tolerances in the Connect tools."
+  },
+  "parts.merge": {
+    "title": "Merge (union)",
+    "body": "Fuses the selected parts into one closed solid. Overlapping and touching parts become one piece, for example two halves of a cut.",
+    "recommended": "Use for parts that should print as one piece.",
+    "tip": "Needs closed solids; if it refuses, run Auto Repair first."
+  },
+  "parts.combine": {
+    "title": "Combine",
+    "body": "Puts the selected parts into one part without fusing them. Fast, and works for any parts.",
+    "tip": "Good for exporting several pieces as one STL file."
+  },
+  "parts.delete": {
+    "title": "Delete",
+    "body": "Removes the selected parts. Ctrl+Z brings them back."
+  },
+  "move.offset": {
+    "title": "Move",
+    "body": "Moves the selected parts along X, Y or Z in millimetres. You can also drag the part in the 3D view (Shift + drag moves it up or down).",
+    "tip": "Slicers re-place parts anyway; moving is for arranging pieces, molds and checking fit."
+  },
+  "move.rotate": {
+    "title": "Rotate",
+    "body": "Rotates the selected parts around their center, in degrees (first X, then Y, then Z).",
+    "tip": "Use Lay flat to put a chosen face exactly on the bed."
+  },
+  "move.rotate90": {
+    "title": "Rotate 90°",
+    "body": "Turns the parts a quarter turn around that axis."
+  },
+  "move.on_bed": {
+    "title": "Put on the bed",
+    "body": "Lowers or raises the parts so their lowest point is exactly at Z = 0, computed on the full-detail model.",
+    "recommended": "On, before exporting parts for printing."
+  },
+  "move.centered": {
+    "title": "Center on the bed",
+    "body": "Moves the parts so the middle of their bounding box is at X = Y = 0."
+  },
+  "move.lay_flat": {
+    "title": "Lay flat",
+    "body": "Click a face of the part: it is turned so that face lies flat on the bed. Ideal for cut faces, which print best flat on the plate (FDM) or angled with supports (resin).",
+    "tip": "Press Esc to cancel picking."
+  },
+  "move.scale": {
+    "title": "Scale",
+    "body": "Uniform size in percent. 100% keeps the original size.",
+    "tip": "Scaling changes pin and wall sizes too; add connectors after scaling."
+  },
+  "move.reset": {
+    "title": "Reset",
+    "body": "Throws away the move that is not applied yet."
+  },
+  "move.apply": {
+    "title": "Apply",
+    "body": "Applies the move to the full-detail parts. It is also applied automatically when you switch tools. Ctrl+Z undoes it."
   }
 }

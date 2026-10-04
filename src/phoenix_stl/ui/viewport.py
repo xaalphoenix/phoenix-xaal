@@ -4,8 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pyvista as pv
 from pyvistaqt import QtInteractor
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
+from vtkmodules.vtkRenderingCore import vtkCellPicker, vtkPropPicker
 
 from . import style
 
@@ -45,6 +46,11 @@ class Viewport(QWidget):
         self._section = None
         self._volume = None
         self._problems = None
+        self._mouse_style = None  # interactor style our mouse observers sit on
+        self._drag_targets: set[str] = set()
+        self._drag_cb = None
+        self._drag = None
+        self._pick_cb = None
 
     # -- info -----------------------------------------------------------------
     def renderer_string(self) -> str:
@@ -67,7 +73,7 @@ class Viewport(QWidget):
                                               np.asarray(faces, dtype=np.int64))
         actor = self.plotter.add_mesh(poly, color=color, name=f"part-{pid}", specular=0.25,
                                       specular_power=20, smooth_shading=False,
-                                      reset_camera=False, pickable=False)
+                                      reset_camera=False, pickable=True)
         self.actors[pid] = actor
         self.colors[pid] = color
         self.render()
@@ -85,12 +91,135 @@ class Viewport(QWidget):
             self.actors[pid].SetVisibility(visible)
             self.render()
 
-    def set_focus(self, pid: str | None) -> None:
-        """Dim every part except the selected one."""
+    def set_focus(self, pids) -> None:
+        """Dim every part except the selected ones (None: dim nothing)."""
+        keep = None if pids is None else set(pids)
         for k, actor in self.actors.items():
-            dim = pid is not None and k != pid
+            dim = keep is not None and k not in keep
             actor.prop.color = _blend(self.colors[k], "#3a3d44", 0.65) if dim else self.colors[k]
         self.render()
+
+    def set_matrix(self, pid: str, matrix) -> None:
+        """Show a part moved by a 4x4 matrix (None = as stored)."""
+        actor = self.actors.get(pid)
+        if actor is not None:
+            actor.user_matrix = np.eye(4) if matrix is None else np.asarray(matrix, float)
+            self.render()
+
+    # -- mouse modes: drag parts, pick a surface ----------------------------------
+    def set_drag(self, pids, on_move=None, on_done=None) -> None:
+        """Left-drag on one of `pids` slides it on the bed (Shift: up/down).
+
+        on_move(delta xyz, vertical) is called while dragging, on_done() at the
+        end. Clicks elsewhere still orbit the camera. pids=None turns it off.
+        """
+        self._drag_targets = set(pids or [])
+        self._drag_cb = (on_move, on_done)
+        self._install_mouse()
+        cursor = Qt.OpenHandCursor if self._drag_targets else Qt.ArrowCursor
+        self.plotter.interactor.setCursor(cursor)
+
+    def pick_surface(self, callback) -> None:
+        """The next left click on a part calls callback(pid, point, normal)."""
+        self._pick_cb = callback
+        self._install_mouse()
+        self.plotter.interactor.setCursor(Qt.CrossCursor)
+
+    def cancel_pick(self) -> None:
+        self._pick_cb = None
+        self.set_drag(self._drag_targets, *(self._drag_cb or (None, None)))
+
+    def _install_mouse(self) -> None:
+        style = self.plotter.iren.interactor.GetInteractorStyle()
+        if style is self._mouse_style:
+            return
+        # Observers on the style replace its default handlers; we call those
+        # ourselves whenever the click is not ours.
+        style.AddObserver("LeftButtonPressEvent", self._on_press)
+        style.AddObserver("MouseMoveEvent", self._on_move)
+        style.AddObserver("LeftButtonReleaseEvent", self._on_release)
+        self._mouse_style = style
+
+    def _pid_of(self, actor):
+        for pid, a in self.actors.items():
+            if a is actor:
+                return pid
+        return None
+
+    def _on_press(self, style, _event):
+        x, y = self.plotter.iren.interactor.GetEventPosition()
+        if self._pick_cb is not None:
+            cb, self._pick_cb = self._pick_cb, None
+            self.set_drag(self._drag_targets, *(self._drag_cb or (None, None)))
+            picker = vtkCellPicker()
+            picker.SetTolerance(0.0005)
+            if picker.Pick(x, y, 0, self.plotter.renderer):
+                pid = self._pid_of(picker.GetActor())
+                if pid is not None:
+                    cb(pid, np.array(picker.GetPickPosition()), np.array(picker.GetPickNormal()))
+            return
+        if self._drag_targets:
+            picker = vtkPropPicker()
+            if picker.Pick(x, y, 0, self.plotter.renderer):
+                pid = self._pid_of(picker.GetActor())
+                if pid in self._drag_targets:
+                    vertical = bool(self.plotter.iren.interactor.GetShiftKey())
+                    start = np.array(picker.GetPickPosition())
+                    self._drag = {"start": start, "vertical": vertical}
+                    hit = self._plane_hit(x, y)
+                    self._drag["start"] = hit if hit is not None else start
+                    self.plotter.interactor.setCursor(Qt.ClosedHandCursor)
+                    return
+        style.OnLeftButtonDown()
+
+    def _on_move(self, style, _event):
+        if self._drag is None:
+            style.OnMouseMove()
+            return
+        x, y = self.plotter.iren.interactor.GetEventPosition()
+        hit = self._plane_hit(x, y)
+        if hit is not None and self._drag_cb and self._drag_cb[0]:
+            delta = hit - self._drag["start"]
+            if self._drag["vertical"]:
+                delta[:2] = 0.0
+            else:
+                delta[2] = 0.0
+            self._drag_cb[0](delta, self._drag["vertical"])
+
+    def _on_release(self, style, _event):
+        if self._drag is None:
+            style.OnLeftButtonUp()
+            return
+        self._drag = None
+        self.plotter.interactor.setCursor(Qt.OpenHandCursor)
+        if self._drag_cb and self._drag_cb[1]:
+            self._drag_cb[1]()
+
+    def _plane_hit(self, x, y):
+        """Mouse ray hit on the drag plane (horizontal, or vertical facing the camera)."""
+        ren = self.plotter.renderer
+        pts = []
+        for z in (0.0, 1.0):
+            ren.SetDisplayPoint(x, y, z)
+            ren.DisplayToWorld()
+            w = np.array(ren.GetWorldPoint(), float)
+            pts.append(w[:3] / (w[3] or 1.0))
+        p0, d = pts[0], pts[1] - pts[0]
+        start = self._drag["start"] if self._drag else None
+        if start is None:
+            return None
+        if self._drag["vertical"]:
+            n = np.array([d[0], d[1], 0.0])
+            if np.linalg.norm(n) < 1e-12:
+                return None
+            n /= np.linalg.norm(n)
+        else:
+            n = np.array([0.0, 0.0, 1.0])
+        denom = float(d @ n)
+        if abs(denom) < 1e-12:
+            return None
+        t = float((start - p0) @ n) / denom
+        return p0 + t * d
 
     def reset_view(self, pid: str | None = None) -> None:
         """Frame one part, or all visible parts (overlays like the printer box don't count)."""

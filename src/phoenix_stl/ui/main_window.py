@@ -1,4 +1,4 @@
-"""Main window: wires parts, viewport, tool panels and the engine together."""
+"""Main window: wires parts, viewport, tool panels, undo history and the engine."""
 from __future__ import annotations
 
 import os
@@ -10,16 +10,20 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QStyle,
                                QTabWidget, QWidget)
+from scipy.spatial.transform import Rotation
 
 from .. import APP_NAME, __version__
 from ..core import hardware
 from ..core.cut import section_segments
 from ..core.mesh import Mesh
+from ..core.transform import rotation_to, transform_points, translation
 from .engine_bridge import EngineBridge
 from .help_hover import HoverHelp
+from .history import History, Step, snapshot
 from .i18n import LANGS, i18n, t
 from .panels.cut_panel import CutPanel
 from .panels.export_panel import ExportPanel
+from .panels.move_panel import MovePanel, angles_of, compose
 from .panels.repair_panel import RepairPanel
 from .parts_panel import Part, PartsPanel, fit_state
 from .viewport import Viewport
@@ -40,6 +44,11 @@ def safe_filename(name: str) -> str:
     return name or "part"
 
 
+def merged_name(names: list[str]) -> str:
+    prefix = os.path.commonprefix(names).rstrip("_- ")
+    return (prefix if len(prefix) >= 2 else names[0]) + "_merged"
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -49,9 +58,12 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.help = HoverHelp(self)
         self.engine = EngineBridge(self)
+        self.history = History(self._purge)
         self._budget = None
         self._first_load = True
         self._last_msg = ("progress.idle", {})
+        self._pending = None  # move tool session: {"pids", "center", "matrix"}
+        self._drag_base = None
 
         self.viewport = Viewport(self)
         self.setCentralWidget(self.viewport)
@@ -61,21 +73,24 @@ class MainWindow(QMainWindow):
         self.parts_dock.setObjectName("parts")
         self.parts_dock.setWidget(self.parts)
         self.parts_dock.setFeatures(QDockWidget.DockWidgetMovable)
-        self.parts_dock.setMinimumWidth(270)
+        self.parts_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.parts_dock)
 
         self.cut = CutPanel(self.help.register)
+        self.move = MovePanel(self.help.register)
         self.repair = RepairPanel(self.help.register)
         self.export = ExportPanel(self.help.register)
         self.tabs = QTabWidget()
-        self.tabs.addTab(_scroll(self.cut), "")
-        self.tabs.addTab(_scroll(self.repair), "")
-        self.tabs.addTab(_scroll(self.export), "")
+        self._tab_keys = []
+        for panel, key in ((self.cut, "tab.cut"), (self.move, "tab.move"), (self.repair, "tab.repair"),
+                           (self.export, "tab.export")):
+            self.tabs.addTab(_scroll(panel), "")
+            self._tab_keys.append(key)
         self.tools_dock = QDockWidget(self)
         self.tools_dock.setObjectName("tools")
         self.tools_dock.setWidget(self.tabs)
         self.tools_dock.setFeatures(QDockWidget.DockWidgetMovable)
-        self.tools_dock.setMinimumWidth(330)
+        self.tools_dock.setMinimumWidth(340)
         self.addDockWidget(Qt.RightDockWidgetArea, self.tools_dock)
 
         self._build_status()
@@ -86,11 +101,15 @@ class MainWindow(QMainWindow):
         self._section_timer.setInterval(25)
         self._section_timer.timeout.connect(self._update_section)
         self._pending_plane = None
+        self._current_tab = self.tabs.currentIndex()
         i18n().changed.connect(self.retranslate)
         self.retranslate()
         self._set_busy_ui(False)
 
     # -- construction -----------------------------------------------------------
+    def _tab_is(self, panel) -> bool:
+        return self.tabs.currentIndex() == {self.cut: 0, self.move: 1, self.repair: 2, self.export: 3}[panel]
+
     def _build_status(self):
         sb = self.statusBar()
         self.msg = QLabel()
@@ -115,7 +134,7 @@ class MainWindow(QMainWindow):
         if icon is not None:
             a.setIcon(self.style().standardIcon(icon))
         if shortcut:
-            a.setShortcut(QKeySequence(shortcut))
+            a.setShortcuts([QKeySequence(s) for s in (shortcut if isinstance(shortcut, tuple) else (shortcut,))])
         a.setCheckable(checkable)
         a.triggered.connect(slot)
         return a
@@ -127,6 +146,11 @@ class MainWindow(QMainWindow):
                                          S.SP_DialogSaveButton)
         self.a_export_all = self._action(lambda: self.export_parts(selected_only=False), "Ctrl+Shift+E")
         self.a_quit = self._action(self.close, "Ctrl+Q")
+        self.a_undo = self._action(self.undo, ("Ctrl+Z",), S.SP_ArrowBack)
+        self.a_redo = self._action(self.redo, ("Ctrl+Y", "Ctrl+Shift+Z"), S.SP_ArrowForward)
+        self.a_merge = self._action(lambda: self.merge_selected("union"), "Ctrl+M")
+        self.a_combine = self._action(lambda: self.merge_selected("combine"), "Ctrl+Shift+M")
+        self.a_select_all = self._action(lambda: self.parts.list.selectAll(), "Ctrl+A")
         self.a_analyze = self._action(self.analyze_selected, "Ctrl+I", S.SP_FileDialogContentsView)
         self.a_repair = self._action(lambda: self.repair_selected(self.repair.options()), "Ctrl+R",
                                      S.SP_BrowserReload)
@@ -152,8 +176,11 @@ class MainWindow(QMainWindow):
 
         mb = self.menuBar()
         self.m_file = mb.addMenu("")
-        for a in (self.a_open, self.a_export_sel, self.a_export_all, None, self.a_delete, None, self.a_quit):
+        for a in (self.a_open, self.a_export_sel, self.a_export_all, None, self.a_quit):
             self.m_file.addSeparator() if a is None else self.m_file.addAction(a)
+        self.m_edit = mb.addMenu("")
+        for a in (self.a_undo, self.a_redo, None, self.a_select_all, self.a_merge, self.a_combine, self.a_delete):
+            self.m_edit.addSeparator() if a is None else self.m_edit.addAction(a)
         self.m_view = mb.addMenu("")
         for a in (self.a_reset, self.a_top, self.a_front, self.a_side, None, self.a_volume, self.a_edges):
             self.m_view.addSeparator() if a is None else self.m_view.addAction(a)
@@ -169,7 +196,8 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         tb.setIconSize(QSize(20, 20))
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        for a in (self.a_open, self.a_export_sel, None, self.a_analyze, self.a_repair, None, self.a_reset):
+        for a in (self.a_open, self.a_export_sel, None, self.a_undo, self.a_redo, None, self.a_analyze,
+                  self.a_repair, None, self.a_reset):
             tb.addSeparator() if a is None else tb.addAction(a)
 
     def _connect(self):
@@ -181,20 +209,28 @@ class MainWindow(QMainWindow):
         e.busy_changed.connect(self._set_busy_ui)
         p = self.parts
         p.selection_changed.connect(self._selection_changed)
+        p.list.itemSelectionChanged.connect(self._multi_selection_changed)
         p.visibility_changed.connect(self._visibility_changed)
-        p.delete_requested.connect(lambda pid: self.delete_selected())
+        p.renamed.connect(self._renamed)
+        p.delete_requested.connect(self.delete_selected)
+        p.merge_requested.connect(self.merge_selected)
         p.printer_changed.connect(self._update_volume)
         p.volume_toggled.connect(self._volume_toggled)
         self.cut.plane_changed.connect(self._plane_changed)
         self.cut.gizmo_toggled.connect(lambda _: self._update_tool_overlays())
         self.cut.apply_requested.connect(self.cut_selected)
         self.viewport.plane_moved.connect(self.cut.set_from_handle)
+        self.move.changed.connect(self._update_move_preview)
+        self.move.apply_requested.connect(lambda: self.commit_move())
+        self.move.reset_requested.connect(self._reset_move)
+        self.move.lay_flat_requested.connect(self._lay_flat)
+        self.move.rotate90_requested.connect(self._rotate90)
         self.repair.analyze_requested.connect(self.analyze_selected)
         self.repair.repair_requested.connect(self.repair_selected)
         self.repair.show_edges_toggled.connect(self._edges_toggled)
         self.export.export_selected.connect(lambda folder: self.export_parts(True, folder))
         self.export.export_all.connect(lambda folder: self.export_parts(False, folder))
-        self.tabs.currentChanged.connect(lambda _: self._update_tool_overlays())
+        self.tabs.currentChanged.connect(self._tab_changed)
 
     # -- helpers --------------------------------------------------------------------
     def budget(self) -> int:
@@ -207,9 +243,13 @@ class MainWindow(QMainWindow):
         return max(MIN_PREVIEW, self.budget() // max(1, n))
 
     def status(self, key: str, **kw) -> None:
-        """Show a translated status message; it follows language switches."""
+        """Show a translated status message; it follows language switches.
+
+        A value written as "@some.key" is itself translated when shown.
+        """
         self._last_msg = (key, kw)
-        self.msg.setText(t(key, **kw))
+        shown = {k: t(v[1:]) if isinstance(v, str) and v.startswith("@") else v for k, v in kw.items()}
+        self.msg.setText(t(key, **shown))
 
     def _set_busy_ui(self, busy: bool):
         for w in (self.progress, self.progress_text, self.cancel_btn):
@@ -218,11 +258,26 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             self.progress_text.setText("")
         self.cut.set_busy(busy)
+        self.move.set_busy(busy)
         self.export.set_busy(busy)
+        self.parts.set_busy(busy)
         has = self.parts.selected() is not None
         self.repair.set_enabled(has and not busy)
+        any_parts = bool(self.parts.parts)
         for a in (self.a_analyze, self.a_repair, self.a_export_sel, self.a_export_all, self.a_delete):
-            a.setEnabled(not busy and bool(self.parts.parts))
+            a.setEnabled(not busy and any_parts)
+        n_sel = len(self.parts.selected_parts())
+        self.a_merge.setEnabled(not busy and n_sel >= 2)
+        self.a_combine.setEnabled(not busy and n_sel >= 2)
+        self._refresh_undo(busy)
+
+    def _refresh_undo(self, busy: bool | None = None):
+        busy = self.engine.busy if busy is None else busy
+        self.a_undo.setEnabled(not busy and self.history.can_undo)
+        self.a_redo.setEnabled(not busy and self.history.can_redo)
+        u, r = self.history.label(), self.history.label(redo=True)
+        self.a_undo.setText(t("action.undo") + (f": {t(u)}" if u else ""))
+        self.a_redo.setText(t("action.redo") + (f": {t(r)}" if r else ""))
 
     def _error(self, code: str, detail: str = ""):
         if code == "memory" and "|" in detail:
@@ -233,6 +288,64 @@ class MainWindow(QMainWindow):
         else:
             text = t("err." + code)
         QMessageBox.warning(self, APP_NAME, text)
+
+    def _purge(self, pids):
+        self.engine.submit("purge", pids=list(pids))
+
+    # -- parts bookkeeping ------------------------------------------------------------
+    def _add_part(self, info: dict, preview, color: str | None = None, status="unknown", index=None,
+                  report=None, visible=True) -> Part:
+        v, f = preview
+        p = Part(id=info["id"], name=info["name"], n_faces=info["n_faces"], bounds=info["bounds"],
+                 color=color or self.parts.next_color(), status=status, report=report,
+                 visible=visible, preview=Mesh(v, f))
+        self.viewport.set_part(p.id, v, f, p.color)
+        if not visible:
+            self.viewport.set_visible(p.id, False)
+        self.parts.add(p, select=False, index=index)
+        return p
+
+    def _remove_part(self, pid: str) -> int:
+        self.viewport.remove_part(pid)
+        row = self.parts.remove(pid)
+        if not self.parts.parts:
+            self._selection_changed(None)
+        return row
+
+    def _apply_change(self, r: dict, label: str, meta=None) -> list[Part]:
+        """Swap the change set's removed parts for its added ones; record an undo step."""
+        old = [self.parts.parts[pid] for pid in r["removed"] if pid in self.parts.parts]
+        snaps = []
+        index = None
+        for p in old:
+            s = snapshot(p)
+            s.extra["row"] = self._remove_part(p.id)
+            snaps.append(s)
+            index = s.extra["row"] if index is None else min(index, s.extra["row"])
+        new = []
+        for i, item in enumerate(r["added"]):
+            kw = meta(i, item, old) if meta else {}
+            new.append(self._add_part(item["part"], item["preview"],
+                                      index=None if index is None or index < 0 else index + i, **kw))
+        self.history.push(Step(label, snaps, [snapshot(p) for p in new]))
+        if new:
+            self.parts.select_many([p.id for p in new])
+        self._refresh_undo()
+        return new
+
+    def _same_as_old(self, i, item, old):
+        """Keep look and state of the part a result replaces (move, repair)."""
+        if i < len(old):
+            o = old[i]
+            return {"color": o.color, "status": o.status, "report": o.report, "visible": o.visible}
+        return {}
+
+    def _remember_status(self, p: Part):
+        """Analysis finished later than the undo step: update its snapshots too."""
+        for step in self.history.undo_steps + self.history.redo_steps:
+            for s in step.removed + step.added:
+                if s.id == p.id:
+                    s.status, s.report = p.status, p.report
 
     # -- files ----------------------------------------------------------------------
     def open_dialog(self):
@@ -253,11 +366,25 @@ class MainWindow(QMainWindow):
     def dropEvent(self, ev):
         self.open_files([u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()])
 
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            self.viewport.cancel_pick()
+        super().keyPressEvent(ev)
+
     # -- actions ----------------------------------------------------------------------
+    def _after_commit(self, fn):
+        """Run fn once any pending move has been applied to the real parts."""
+        if self._move_dirty():
+            self.commit_move(then=fn)
+        else:
+            fn()
+
     def analyze_selected(self, auto: bool = False):
-        p = self.parts.selected()
-        if p is not None:
-            self._analyze(p, auto)
+        def go():
+            p = self.parts.selected()
+            if p is not None:
+                self._analyze(p, auto)
+        self._after_commit(go)
 
     def _analyze(self, p: Part, auto: bool = False):
         p.status = "checking"
@@ -267,10 +394,12 @@ class MainWindow(QMainWindow):
         self.engine.submit("analyze", tag={"pid": p.id, "auto": auto}, pid=p.id)
 
     def repair_selected(self, options: dict):
-        p = self.parts.selected()
-        if p is not None:
-            self.engine.submit("repair", tag={"pid": p.id}, pid=p.id, name=p.name, options=options,
-                               preview_faces=self.preview_faces(0))
+        def go():
+            p = self.parts.selected()
+            if p is not None:
+                self.engine.submit("repair", tag={"pid": p.id}, pid=p.id, name=p.name, options=options,
+                                   preview_faces=self.preview_faces(0))
+        self._after_commit(go)
 
     def cut_selected(self, normal, origin, keep: str):
         p = self.parts.selected()
@@ -278,17 +407,43 @@ class MainWindow(QMainWindow):
             self.engine.submit("cut", tag={"pid": p.id}, pid=p.id, name=p.name, normal=list(normal),
                                origin=list(origin), keep=keep, preview_faces=self.preview_faces(1))
 
+    def merge_selected(self, mode: str = "union"):
+        def go():
+            parts = self.parts.selected_parts()
+            if len(parts) < 2 or self.engine.busy:
+                return
+            self.engine.submit("merge", tag={"mode": mode}, pids=[p.id for p in parts],
+                               name=merged_name([p.name for p in parts]), mode=mode,
+                               preview_faces=self.preview_faces(0))
+        self._after_commit(go)
+
     def delete_selected(self):
-        p = self.parts.selected()
-        if p is None or self.engine.busy:
+        parts = self.parts.selected_parts()
+        if not parts or self.engine.busy:
             return
-        if QMessageBox.question(self, APP_NAME, f"{t('action.delete')}: {p.name}?") != QMessageBox.Yes:
+        names = ", ".join(p.name for p in parts)
+        if QMessageBox.question(self, APP_NAME, f"{t('action.delete')}: {names}?") != QMessageBox.Yes:
             return
-        self.engine.submit("delete", tag={"pid": p.id}, pid=p.id)
-        self._remove_part(p.id)
-        self.status("msg.deleted", name=p.name)
+        self._end_move_session()
+        snaps = []
+        for p in parts:
+            s = snapshot(p)
+            s.extra["row"] = self._remove_part(p.id)
+            snaps.append(s)
+        self.history.push(Step("action.delete", removed=snaps))
+        self._refresh_undo()
+        self.status("msg.deleted", name=names)
+
+    def _renamed(self, pid, old, new):
+        self.history.push(Step("action.rename", renames=[(pid, old, new)]))
+        self._refresh_undo()
+        if pid == self.parts.selected_id():
+            self._selection_changed(pid)
 
     def export_parts(self, selected_only: bool, folder: str | None = None):
+        self._after_commit(lambda: self._export(selected_only, folder))
+
+    def _export(self, selected_only: bool, folder: str | None):
         folder = folder or self.export.folder.text().strip()
         if not folder:
             folder = QFileDialog.getExistingDirectory(self, t("export.folder"))
@@ -296,8 +451,7 @@ class MainWindow(QMainWindow):
                 return
             self.export.folder.setText(folder)
         os.makedirs(folder, exist_ok=True)
-        parts = ([self.parts.selected()] if selected_only else self.parts.visible_parts())
-        parts = [p for p in parts if p is not None]
+        parts = self.parts.selected_parts() if selected_only else self.parts.visible_parts()
         if not parts:
             QMessageBox.information(self, APP_NAME, t("export.nothing"))
             return
@@ -319,6 +473,48 @@ class MainWindow(QMainWindow):
                 self, APP_NAME, t("export.overwrite", n=len(existing))) != QMessageBox.Yes:
             return
         self.engine.submit("export", tag={"folder": folder}, items=items)
+
+    # -- undo / redo ------------------------------------------------------------------
+    def undo(self):
+        if not self.engine.busy and self.history.can_undo:
+            self._after_commit(lambda: self._swap(self.history.take_undo(), undo=True))
+
+    def redo(self):
+        if not self.engine.busy and self.history.can_redo:
+            self._after_commit(lambda: self._swap(self.history.take_redo(), undo=False))
+
+    def _swap(self, step: Step, undo: bool):
+        self._end_move_session()
+        remove, restore = (step.added, step.removed) if undo else (step.removed, step.added)
+        for s in remove:
+            if s.id in self.parts.parts:
+                self._remove_part(s.id)
+        for pid, old, new in step.renames:
+            p = self.parts.parts.get(pid)
+            if p is not None:
+                p.name = old if undo else new
+                self.parts.update_part(pid)
+        key = "history.undone" if undo else "history.redone"
+        if restore:
+            self.engine.submit("restore", tag={"parts": restore, "key": key, "label": step.label},
+                               pids=[s.id for s in restore])
+        else:
+            self.status(key, what="@" + step.label)
+            self._selection_changed(self.parts.selected_id())
+        self._refresh_undo()
+
+    def _done_restore(self, job, r):
+        previews = {x["id"]: x["preview"] for x in r["parts"]}
+        restored = []
+        for s in sorted(job.tag["parts"], key=lambda s: s.extra.get("row", 1 << 30)):
+            info = {"id": s.id, "name": s.name, "n_faces": s.n_faces, "bounds": s.bounds}
+            row = s.extra.get("row")
+            restored.append(self._add_part(info, previews[s.id], s.color, s.status,
+                                           index=row if row is not None and row >= 0 else None,
+                                           report=s.report, visible=s.visible))
+        if restored:
+            self.parts.select_many([p.id for p in restored])
+        self.status(job.tag["key"], what="@" + job.tag["label"])
 
     # -- engine events -------------------------------------------------------------
     def _job_started(self, job):
@@ -346,24 +542,15 @@ class MainWindow(QMainWindow):
                 self.parts.update_part(p.id)
                 if p.id == self.parts.selected_id():
                     self.repair.set_report(None)
-
-    def _add_part(self, info: dict, preview, color: str | None = None, status="unknown") -> Part:
-        v, f = preview
-        p = Part(id=info["id"], name=info["name"], n_faces=info["n_faces"], bounds=info["bounds"],
-                 color=color or self.parts.next_color(), status=status, preview=Mesh(v, f))
-        self.viewport.set_part(p.id, v, f, p.color)
-        self.parts.add(p, select=False)
-        return p
-
-    def _remove_part(self, pid: str):
-        self.viewport.remove_part(pid)
-        self.parts.remove(pid)
-        if not self.parts.parts:
-            self._selection_changed(None)
+        elif job.op == "transform":
+            for pid, _, _ in job.kwargs["items"]:
+                self.viewport.set_matrix(pid, None)
+            if self._tab_is(self.move):
+                self._start_move_session()
 
     def _done_load(self, job, r):
-        p = self._add_part(r["part"], r["preview"])
-        self.parts.select(p.id)
+        new = self._apply_change(r, "action.open")
+        p = new[0]
         if self._first_load:
             self.viewport.view("iso")
             self._first_load = False
@@ -377,6 +564,7 @@ class MainWindow(QMainWindow):
             return
         p.report, p.segments = r["report"], r["segments"]
         p.status = "printable" if p.report["printable"] else "problems"
+        self._remember_status(p)
         self.parts.update_part(p.id)
         if p.id == self.parts.selected_id():
             self.repair.set_report(p.report)
@@ -384,22 +572,16 @@ class MainWindow(QMainWindow):
         if p.status == "problems":
             self.status("msg.problems", name=p.name)
             if job.tag.get("auto"):
-                self.tabs.setCurrentIndex(1)
+                self.tabs.setCurrentIndex(2)
         else:
             self.status("msg.printable", name=p.name)
 
     def _done_repair(self, job, r):
-        p = self.parts.parts.get(r["part"]["id"])
-        if p is None:
-            return
-        info = r["part"]
-        p.n_faces, p.bounds = info["n_faces"], info["bounds"]
-        v, f = r["preview"]
-        p.preview = Mesh(v, f)
-        self.viewport.set_part(p.id, v, f, p.color)
+        new = self._apply_change(r, "action.repair", meta=lambda i, item, old: {
+            "color": old[0].color if old else None, "visible": old[0].visible if old else True})
         self._show_repair_log({k: v for k, v in r["log"].items() if v})
-        self._selection_changed(p.id)
-        self._analyze(p)
+        for p in new:
+            self._analyze(p)
 
     def _show_repair_log(self, log: dict):
         summary = ", ".join(t("log." + k, n=i18n().num(v)) for k, v in log.items()) or t("repair.nothing")
@@ -407,15 +589,14 @@ class MainWindow(QMainWindow):
         self.msg.setText(t("repair.done", summary=summary))
 
     def _done_cut(self, job, r):
-        parent = self.parts.parts.get(r["removed"])
+        parent = self.parts.parts.get(r["removed"][0]) if r["removed"] else None
         inherit = parent is not None and parent.status == "printable" and not r["open_loops"]
-        parent_color = parent.color if parent is not None else None
-        self._remove_part(r["removed"])
-        new = []
-        for i, item in enumerate(r["parts"]):
-            color = parent_color if i == 0 else None
-            new.append(self._add_part(item["part"], item["preview"], color,
-                                      "printable" if inherit else "unknown"))
+
+        def meta(i, item, old):
+            return {"color": old[0].color if (old and i == 0) else None,
+                    "status": "printable" if inherit else "unknown"}
+
+        new = self._apply_change(r, "action.cut", meta)
         if new:
             self.parts.select(new[0].id)
         if r["open_loops"]:
@@ -425,20 +606,169 @@ class MainWindow(QMainWindow):
                 self._analyze(p)
         self.status("cut.done", n=len(new))
 
+    def _done_transform(self, job, r):
+        self._pending = None
+        self._apply_change(r, "action.move", self._same_as_old)
+        self.move.reset()
+        self.status("move.done")
+        then = job.tag.get("then") if job.tag else None
+        if self._tab_is(self.move):
+            self._start_move_session()
+        if then:
+            then()
+
+    def _done_merge(self, job, r):
+        new = self._apply_change(r, "action.merge" if job.tag["mode"] == "union" else "action.combine",
+                                 meta=lambda i, item, old: {"color": old[0].color if old else None})
+        for p in new:
+            self._analyze(p)
+        self.status("msg.merged", name=new[0].name if new else "")
+
     def _done_export(self, job, r):
         self.status("export.done", n=len(r["paths"]), folder=job.tag["folder"])
 
+    # -- move tool ------------------------------------------------------------------
+    def _move_dirty(self) -> bool:
+        return bool(self._pending and self._pending["pids"]) and not self.move.is_identity()
+
+    def _start_move_session(self):
+        parts = [p for p in self.parts.selected_parts() if p.visible]
+        if not parts:
+            self._pending = None
+            self.move.set_target(0)
+            self.viewport.set_drag(None)
+            return
+        b = np.array([p.bounds for p in parts])
+        center = (b[:, 0].min(0) + b[:, 1].max(0)) / 2
+        self._pending = {"pids": [p.id for p in parts], "center": center, "matrix": np.eye(4)}
+        self.move.reset()
+        self.move.set_target(len(parts), parts[0].name)
+        self.viewport.set_drag(self._pending["pids"], self._on_drag, self._on_drag_done)
+        self._update_move_preview()
+
+    def _end_move_session(self):
+        """Drop an unapplied move (the parts snap back)."""
+        if self._pending:
+            for pid in self._pending["pids"]:
+                self.viewport.set_matrix(pid, None)
+        self._pending = None
+        self.viewport.set_drag(None)
+
+    def _reset_move(self):
+        self.move.reset()
+        self._update_move_preview()
+
+    def _preview_points(self):
+        pts = [self.parts.parts[pid].preview.vertices for pid in self._pending["pids"] if pid in self.parts.parts]
+        return np.concatenate(pts) if pts else np.zeros((0, 3), np.float32)
+
+    def _update_move_preview(self):
+        if not self._pending:
+            return
+        v = self.move.values()
+        m = compose(self._pending["center"], v["offset"], v["angles"], v["scale"])
+        self._pending["matrix"] = m
+        shown = m
+        pts = self._preview_points()
+        if len(pts):
+            moved = transform_points(pts, m)
+            lo, hi = moved.min(0).astype(float), moved.max(0).astype(float)
+            shift = np.zeros(3)
+            if v["centered"]:
+                shift[:2] = -(lo[:2] + hi[:2]) / 2
+            if v["on_bed"]:
+                shift[2] = -lo[2]
+            shown = translation(shift) @ m
+            self.move.set_info(hi - lo, lo[2] + shift[2])
+        for pid in self._pending["pids"]:
+            self.viewport.set_matrix(pid, shown)
+
+    def _on_drag(self, delta, vertical):
+        if self._drag_base is None:
+            self._drag_base = list(self.move.values()["offset"])
+        off = list(self._drag_base)
+        if vertical:
+            off[2] += float(delta[2])
+            self.move.set_values(offset=off, on_bed=False)
+        else:
+            off[0] += float(delta[0])
+            off[1] += float(delta[1])
+            self.move.set_values(offset=off, centered=False)
+        self._update_move_preview()
+
+    def _on_drag_done(self):
+        self._drag_base = None
+
+    def _rotate90(self, axis: int):
+        rot = Rotation.from_euler("xyz", self.move.values()["angles"], degrees=True).as_matrix()
+        step = Rotation.from_euler("xyz", np.eye(3)[axis] * 90, degrees=True).as_matrix()
+        self.move.set_values(angles=angles_of(step @ rot))
+        self._update_move_preview()
+
+    def _lay_flat(self):
+        if not self._pending:
+            return
+        self.status("move.pick_face")
+
+        def picked(pid, point, normal):
+            if pid not in self._pending["pids"]:
+                return
+            rot = Rotation.from_euler("xyz", self.move.values()["angles"], degrees=True).as_matrix()
+            new = rotation_to(normal, (0, 0, -1)) @ rot
+            self.move.set_values(angles=angles_of(new), on_bed=True)
+            self._update_move_preview()
+            self.status("move.laid_flat")
+
+        self.viewport.pick_surface(picked)
+
+    def commit_move(self, then=None):
+        if not self._move_dirty():
+            if then:
+                then()
+            return
+        v = self.move.values()
+        m = self._pending["matrix"]
+        items = [(pid, self.parts.parts[pid].name, m.tolist()) for pid in self._pending["pids"]
+                 if pid in self.parts.parts]
+        self.viewport.set_drag(None)
+        self.engine.submit("transform", tag={"then": then}, items=items, on_bed=v["on_bed"],
+                           centered=v["centered"])
+        self._pending = {**self._pending, "pids": []}  # applied; don't apply twice
+
     # -- selection & overlays ---------------------------------------------------------
+    def _tab_changed(self, index):
+        prev, self._current_tab = self._current_tab, index
+        if prev == 1 and index != 1:
+            if self._move_dirty():
+                self.commit_move()
+            else:
+                self._end_move_session()
+        if index == 1:
+            self._start_move_session()
+        self._update_tool_overlays()
+
+    def _multi_selection_changed(self):
+        sel = [p.id for p in self.parts.selected_parts()]
+        self.viewport.set_focus(sel if len(self.parts.parts) > 1 and sel else None)
+        self._set_busy_ui(self.engine.busy)
+        if self._tab_is(self.move):
+            current = set(self._pending["pids"]) if self._pending else set()
+            if current != {p.id for p in self.parts.selected_parts() if p.visible}:
+                if self._move_dirty():
+                    self.commit_move(then=self._start_move_session)
+                else:
+                    self._end_move_session()
+                    self._start_move_session()
+
     def _selection_changed(self, pid):
         p = self.parts.parts.get(pid) if pid else None
-        self.viewport.set_focus(pid if len(self.parts.parts) > 1 else None)
         if p is None:
             self.cut.set_part(None)
             self.repair.set_report(None)
         else:
             self.cut.set_part(p.name, p.preview.vertices, p.bounds)
             self.repair.set_report(p.report, checking=p.status == "checking")
-        self._set_busy_ui(self.engine.busy)
+        self._multi_selection_changed()
         self._update_tool_overlays()
         self._update_volume()
         self._update_problems()
@@ -450,14 +780,14 @@ class MainWindow(QMainWindow):
         p = self.parts.selected()
         if p is None:
             return
-        if self.tabs.currentIndex() == 0 and self.cut.gizmo.isChecked():
+        if self._tab_is(self.cut) and self.cut.gizmo.isChecked():
             self.viewport.set_plane(normal, origin)
         self._pending_plane = (normal, origin)
         self._section_timer.start()
 
     def _update_section(self):
         p = self.parts.selected()
-        if p is None or self._pending_plane is None or self.tabs.currentIndex() != 0:
+        if p is None or self._pending_plane is None or not self._tab_is(self.cut):
             self.viewport.set_section(None)
             return
         n, o = self._pending_plane
@@ -465,7 +795,7 @@ class MainWindow(QMainWindow):
 
     def _update_tool_overlays(self):
         p = self.parts.selected()
-        if p is not None and self.tabs.currentIndex() == 0:
+        if p is not None and self._tab_is(self.cut):
             n, o = self.cut.normal(), self.cut.origin()
             if self.cut.gizmo.isChecked():
                 b = np.asarray(p.bounds)
@@ -523,12 +853,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(t("app.title"))
         self.parts_dock.setWindowTitle(t("dock.parts"))
         self.tools_dock.setWindowTitle(t("dock.tools"))
-        for i, key in enumerate(("tab.cut", "tab.repair", "tab.export")):
+        for i, key in enumerate(self._tab_keys):
             self.tabs.setTabText(i, t(key))
-        self.m_file.setTitle(t("menu.file"))
-        self.m_view.setTitle(t("menu.view"))
-        self.m_lang.setTitle(t("menu.language"))
-        self.m_help.setTitle(t("menu.help"))
+        for m, key in ((self.m_file, "menu.file"), (self.m_edit, "menu.edit"), (self.m_view, "menu.view"),
+                       (self.m_lang, "menu.language"), (self.m_help, "menu.help")):
+            m.setTitle(t(key))
         for a, key in ((self.a_open, "action.open"), (self.a_export_sel, "action.export_selected"),
                        (self.a_export_all, "action.export_all"), (self.a_quit, "action.quit"),
                        (self.a_analyze, "action.analyze"), (self.a_repair, "action.repair"),
@@ -536,15 +865,15 @@ class MainWindow(QMainWindow):
                        (self.a_front, "action.view_front"), (self.a_side, "action.view_side"),
                        (self.a_volume, "action.show_volume"), (self.a_edges, "action.show_edges"),
                        (self.a_delete, "action.delete"), (self.a_about, "action.about"),
-                       (self.a_sysinfo, "action.sysinfo")):
+                       (self.a_sysinfo, "action.sysinfo"), (self.a_merge, "action.merge"),
+                       (self.a_combine, "action.combine"), (self.a_select_all, "action.select_all")):
             a.setText(t(key))
+        self._refresh_undo()
         self.cancel_btn.setText(t("progress.cancel"))
         for code, a in self.lang_actions.items():
             a.setChecked(code == i18n().lang)
-        self.parts.retranslate()
-        self.cut.retranslate()
-        self.repair.retranslate()
-        self.export.retranslate()
+        for panel in (self.parts, self.cut, self.move, self.repair, self.export):
+            panel.retranslate()
         key, kw = self._last_msg
         if key == "repair.done":
             self._show_repair_log(kw["log"])

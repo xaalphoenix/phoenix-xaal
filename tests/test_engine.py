@@ -5,6 +5,7 @@ import pytest
 
 from phoenix_stl.core.analyze import analyze
 from phoenix_stl.core.io_stl import load_stl, save_stl
+from phoenix_stl.core.transform import rotation_about, translation
 from phoenix_stl.engine import EngineClient
 
 
@@ -15,46 +16,93 @@ def engine():
     eng.shutdown()
 
 
-def test_engine_pipeline(engine, tmp_path, torus):
-    src = str(tmp_path / "torus.stl")
-    save_stl(torus, src)
+def load(engine, tmp_path, mesh, name):
+    src = str(tmp_path / f"{name}.stl")
+    save_stl(mesh, src)
     ev = engine.wait(engine.submit("load", path=src, preview_faces=1000))
-    assert ev.kind == "result"
-    part = ev.result["part"]
+    assert ev.kind == "result", ev
+    assert ev.result["removed"] == []
+    return ev.result["added"][0]
+
+
+def test_engine_pipeline(engine, tmp_path, torus):
+    item = load(engine, tmp_path, torus, "torus")
+    part = item["part"]
     assert part["n_faces"] == torus.n_faces and part["name"] == "torus"
-    pv, pf = ev.result["preview"]
-    assert len(pf) == torus.n_faces  # small models are drawn at full detail
+    assert len(item["preview"][1]) == torus.n_faces  # small models are drawn at full detail
 
     ev = engine.wait(engine.submit("analyze", pid=part["id"]))
     assert ev.result["report"]["printable"]
 
     ev = engine.wait(engine.submit("cut", pid=part["id"], name="torus", normal=(0, 0, 1), origin=(0, 0, 0.5)))
-    assert ev.kind == "result" and ev.result["removed"] == part["id"]
-    names = [p["part"]["name"] for p in ev.result["parts"]]
+    assert ev.kind == "result" and ev.result["removed"] == [part["id"]]
+    names = [p["part"]["name"] for p in ev.result["added"]]
     assert names == ["torus_A", "torus_B"]
 
     # cut one of the halves again (step-by-step cutting)
-    a = ev.result["parts"][0]["part"]
+    a = ev.result["added"][0]["part"]
     ev2 = engine.wait(engine.submit("cut", pid=a["id"], name=a["name"], normal=(1, 0, 0), origin=(0, 0, 0)))
-    assert len(ev2.result["parts"]) == 2
+    assert len(ev2.result["added"]) == 2
 
-    items = [(p["part"]["id"], str(tmp_path / f"{p['part']['name']}.stl")) for p in ev2.result["parts"]]
+    items = [(p["part"]["id"], str(tmp_path / f"{p['part']['name']}.stl")) for p in ev2.result["added"]]
     ev3 = engine.wait(engine.submit("export", items=items))
     assert ev3.kind == "result"
     for _, path in items:
         assert analyze(load_stl(path))[0].printable
 
 
+def test_parts_are_immutable_for_undo(engine, tmp_path, sphere):
+    part = load(engine, tmp_path, sphere, "s")["part"]
+    ev = engine.wait(engine.submit("cut", pid=part["id"], name="s", normal=(0, 0, 1), origin=(0, 0, 0)))
+    assert ev.kind == "result"
+    # the original is still there (undo) and can be restored with its preview
+    ev = engine.wait(engine.submit("restore", pids=[part["id"]]))
+    assert ev.kind == "result" and len(ev.result["parts"][0]["preview"][1]) == sphere.n_faces
+    engine.wait(engine.submit("purge", pids=[part["id"]]))
+    ev = engine.wait(engine.submit("restore", pids=[part["id"]]))
+    assert ev.kind == "error"
+
+
+def test_engine_transform(engine, tmp_path, sphere):
+    part = load(engine, tmp_path, sphere, "s")["part"]
+    m = translation((5, 0, 10)) @ rotation_about((0, 0, 0), np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1.0]]))
+    ev = engine.wait(engine.submit("transform", items=[(part["id"], "s", m.tolist())]))
+    assert ev.kind == "result", ev
+    new = ev.result["added"][0]
+    b = np.array(new["part"]["bounds"])
+    assert np.allclose(b.mean(0), [5, 0, 10], atol=1e-3)
+    pv = new["preview"][0]
+    assert np.allclose(pv.mean(0), [5, 0, 10], atol=0.1)
+    path = str(tmp_path / "moved.stl")
+    engine.wait(engine.submit("export", items=[(new["part"]["id"], path)]))
+    assert analyze(load_stl(path))[0].printable
+
+
+def test_engine_merge(engine, tmp_path, sphere):
+    part = load(engine, tmp_path, sphere, "s")["part"]
+    ev = engine.wait(engine.submit("cut", pid=part["id"], name="s", normal=(0.2, 0.1, 1), origin=(0, 0, 1)))
+    ids = [p["part"]["id"] for p in ev.result["added"]]
+    n_halves = sum(p["part"]["n_faces"] for p in ev.result["added"])
+    ev = engine.wait(engine.submit("merge", pids=ids, name="s", mode="union"))
+    assert ev.kind == "result", ev
+    merged = ev.result["added"][0]
+    path = str(tmp_path / "merged.stl")
+    engine.wait(engine.submit("export", items=[(merged["part"]["id"], path)]))
+    back = load_stl(path)
+    assert analyze(back)[0].printable
+    assert np.isclose(back.volume(), sphere.volume(), rtol=1e-4)
+    ev = engine.wait(engine.submit("merge", pids=ids, name="s", mode="combine"))
+    assert ev.result["added"][0]["part"]["n_faces"] == n_halves
+
+
 def test_engine_repair(engine, tmp_path, sphere):
     from phoenix_stl.core.mesh import Mesh
-    broken = Mesh(sphere.vertices, sphere.faces[40:])
-    src = str(tmp_path / "broken.stl")
-    save_stl(broken, src)
-    part = engine.wait(engine.submit("load", path=src)).result["part"]
+    part = load(engine, tmp_path, Mesh(sphere.vertices, sphere.faces[40:]), "broken")["part"]
     assert not engine.wait(engine.submit("analyze", pid=part["id"])).result["report"]["watertight"]
     ev = engine.wait(engine.submit("repair", pid=part["id"], name="broken"))
-    assert ev.result["log"]["filled_holes"] >= 1
-    assert engine.wait(engine.submit("analyze", pid=part["id"])).result["report"]["printable"]
+    assert ev.result["log"]["filled_holes"] >= 1 and ev.result["removed"] == [part["id"]]
+    new_id = ev.result["added"][0]["part"]["id"]
+    assert engine.wait(engine.submit("analyze", pid=new_id)).result["report"]["printable"]
 
 
 def test_engine_errors_and_cancel(engine, tmp_path):
@@ -83,3 +131,18 @@ def test_engine_errors_and_cancel(engine, tmp_path):
 def test_selftest():
     from phoenix_stl import selftest
     assert selftest.run() == 0
+
+
+def test_engine_transform_on_bed_and_centered(engine, tmp_path, sphere):
+    a = load(engine, tmp_path, sphere, "a")["part"]
+    from phoenix_stl.core.transform import translation as tr
+    b = load(engine, tmp_path, sphere, "b")["part"]
+    ev = engine.wait(engine.submit("transform", items=[(a["id"], "a", tr((40, 7, 3)).tolist()),
+                                                       (b["id"], "b", tr((-20, 7, 33)).tolist())],
+                                   on_bed=True, centered=True))
+    assert ev.kind == "result", ev
+    bounds = np.array([x["part"]["bounds"] for x in ev.result["added"]])
+    lo, hi = bounds[:, 0].min(0), bounds[:, 1].max(0)
+    assert abs(lo[2]) < 1e-5 and np.allclose((lo[:2] + hi[:2]) / 2, 0, atol=1e-4)
+    # relative placement inside the group is kept
+    assert np.isclose(bounds[1, 0, 2] - bounds[0, 0, 2], 30, atol=1e-4)

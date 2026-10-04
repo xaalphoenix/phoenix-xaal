@@ -27,6 +27,10 @@ def main(argv=None) -> int:
     from PySide6.QtCore import QCoreApplication
     from PySide6.QtWidgets import QApplication
 
+    if getattr(sys, "frozen", False):
+        from .core.hardware import prefer_high_performance_gpu
+        prefer_high_performance_gpu(sys.executable)
+
     QCoreApplication.setOrganizationName("PHOENIX")
     QCoreApplication.setApplicationName("STL Studio")
     app = QApplication(sys.argv[:1])

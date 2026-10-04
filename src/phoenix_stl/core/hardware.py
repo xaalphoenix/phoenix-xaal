@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import platform
+import sys
 
 import psutil
 
@@ -14,6 +15,8 @@ BYTES_PER_FACE = {
     "cut": 110,
     "preview": 60,
     "export": 40,
+    "transform": 80,
+    "boolean": 520,
 }
 SAFE_FRACTION = 0.8
 
@@ -59,3 +62,29 @@ def check_memory(op: str, n_faces: int):
     need = estimate_bytes(op, n_faces)
     avail = psutil.virtual_memory().available
     return need <= SAFE_FRACTION * avail, need, avail
+
+
+GPU_PREF_KEY = r"Software\Microsoft\DirectX\UserGpuPreferences"
+
+
+def prefer_high_performance_gpu(exe_path: str) -> bool:
+    """Windows: ask for the discrete GPU on dual-GPU laptops (from the next start).
+
+    Writes the same per-user setting as Settings > Display > Graphics settings.
+    Returns True when the preference was newly written.
+    """
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, GPU_PREF_KEY) as key:
+            try:
+                value, _ = winreg.QueryValueEx(key, exe_path)
+                if "GpuPreference=2" in value:
+                    return False
+            except FileNotFoundError:
+                pass
+            winreg.SetValueEx(key, exe_path, 0, winreg.REG_SZ, "GpuPreference=2;")
+            return True
+    except OSError:
+        return False
