@@ -124,9 +124,11 @@ def occupancy(mesh: Mesh, grid: Grid, progress=None, max_pairs: int = 4_000_000)
 
 # -- distances ----------------------------------------------------------------------------
 
-def surface_samples(mesh: Mesh, spacing: float, limit: int = 8_000_000) -> np.ndarray:
-    """Points covering the surface with gaps of about `spacing` (count follows the area,
-    so long thin triangles cost little)."""
+def surface_samples(mesh: Mesh, spacing: float, limit: int = 8_000_000) -> tuple[np.ndarray, np.ndarray]:
+    """Points covering the surface with gaps of about `spacing`, and the triangle each lies on.
+
+    The count follows the area, so long thin triangles cost little.
+    """
     v = mesh.vertices.astype(np.float64)
     tri = v[mesh.faces]
     # lattice along the two edges from the corner opposite the longest edge
@@ -137,12 +139,14 @@ def surface_samples(mesh: Mesh, spacing: float, limit: int = 8_000_000) -> np.nd
     e0 = tri[:, 1] - tri[:, 0]
     e1 = tri[:, 2] - tri[:, 0]
     area = 0.5 * np.linalg.norm(np.cross(e0, e1), axis=1)
-    est = len(v) + float(area.sum()) / (0.5 * spacing ** 2)
+    est = mesh.n_faces + float(area.sum()) / (0.5 * spacing ** 2)
     if est > limit:  # keep memory bounded on huge surfaces
         spacing *= math.sqrt(est / limit)
     k1 = np.clip(np.ceil(np.linalg.norm(e0, axis=1) / spacing), 1, 256).astype(np.int64)
     k2 = np.clip(np.ceil(np.linalg.norm(e1, axis=1) / spacing), 1, 256).astype(np.int64)
-    out = [v]
+    # every triangle contributes at least its centroid
+    pts = [tri.mean(axis=1)]
+    ids = [np.arange(mesh.n_faces)]
     big = (k1 > 1) | (k2 > 1)
     keys = k1[big] * 1000 + k2[big]
     sel_all = np.nonzero(big)[0]
@@ -157,10 +161,55 @@ def surface_samples(mesh: Mesh, spacing: float, limit: int = 8_000_000) -> np.nd
         A, B = np.meshgrid(np.arange(n1 + 1) / n1, np.arange(n2 + 1) / n2, indexing="ij")
         m = (A + B) <= 1 + 1e-9
         wa, wb = A[m], B[m]
-        pts = (tri[sel, 0][:, None, :] + wa[None, :, None] * e0[sel][:, None, :]
-               + wb[None, :, None] * e1[sel][:, None, :])
-        out.append(pts.reshape(-1, 3))
-    return np.vstack(out)
+        q = (tri[sel, 0][:, None, :] + wa[None, :, None] * e0[sel][:, None, :]
+             + wb[None, :, None] * e1[sel][:, None, :])
+        pts.append(q.reshape(-1, 3))
+        ids.append(np.repeat(sel, len(wa)))
+    return np.vstack(pts), np.concatenate(ids)
+
+
+def closest_on_triangles(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Closest point on triangle (a, b, c) to p, row by row (Ericson, Real-Time Collision Detection)."""
+    ab, ac, ap = b - a, c - a, p - a
+    d1 = np.einsum("ij,ij->i", ab, ap)
+    d2 = np.einsum("ij,ij->i", ac, ap)
+    bp = p - b
+    d3 = np.einsum("ij,ij->i", ab, bp)
+    d4 = np.einsum("ij,ij->i", ac, bp)
+    cp = p - c
+    d5 = np.einsum("ij,ij->i", ab, cp)
+    d6 = np.einsum("ij,ij->i", ac, cp)
+    va = d3 * d6 - d5 * d4
+    vb = d5 * d2 - d1 * d6
+    vc = d1 * d4 - d3 * d2
+    out = np.empty_like(p)
+    done = np.zeros(len(p), dtype=bool)
+
+    def put(mask, val):
+        m = mask & ~done
+        out[m] = val[m] if val.ndim == 2 else val
+        done[m] = True
+
+    put((d1 <= 0) & (d2 <= 0), a)
+    put((d3 >= 0) & (d4 <= d3), b)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v1 = d1 / (d1 - d3)
+        put((vc <= 0) & (d1 >= 0) & (d3 <= 0), a + v1[:, None] * ab)
+        put((d6 >= 0) & (d5 <= d6), c)
+        w1 = d2 / (d2 - d6)
+        put((vb <= 0) & (d2 >= 0) & (d6 <= 0), a + w1[:, None] * ac)
+        w2 = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        put((va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0), b + w2[:, None] * (c - b))
+        den = 1.0 / (va + vb + vc)
+        v = vb * den
+        w = vc * den
+        put(np.ones(len(p), dtype=bool), a + v[:, None] * ab + w[:, None] * ac)
+    bad = ~np.isfinite(out).all(axis=1)
+    if bad.any():  # degenerate triangles: nearest corner
+        cand = np.stack([a[bad], b[bad], c[bad]], 1)
+        k = np.argmin(np.linalg.norm(cand - p[bad, None], axis=2), axis=1)
+        out[bad] = cand[np.arange(bad.sum()), k]
+    return out
 
 
 @dataclass
@@ -169,7 +218,9 @@ class DistanceField:
     grid: Grid
     inside: np.ndarray
     dist: np.ndarray  # float32, mm
-    tree: cKDTree | None = None
+    tree: cKDTree | None = None  # surface samples
+    sample_tri: np.ndarray | None = None  # triangle of each sample
+    tris: np.ndarray | None = None  # (F, 3, 3) float64
 
     @classmethod
     def build(cls, mesh: Mesh, h: float, pad: float, exact: bool = True, progress=None) -> "DistanceField":
@@ -178,13 +229,51 @@ class DistanceField:
         report(progress, 0.65, "Measuring distances")
         # distance from outside voxel centres to the nearest inside centre; the surface
         # lies on average half a voxel closer
-        d = ndimage.distance_transform_edt(~inside, sampling=h).astype(np.float32)
+        d = ndimage.distance_transform_edt(~inside, sampling=h)
         d = np.where(inside, 0.0, np.maximum(d - 0.5 * h, 0.0)).astype(np.float32)
-        tree = None
-        if exact:
-            report(progress, 0.8, "Measuring distances")
-            tree = cKDTree(surface_samples(mesh, 0.5 * h))
-        return cls(grid, inside, d, tree)
+        if not exact:
+            return cls(grid, inside, d)
+        report(progress, 0.8, "Measuring distances")
+        # samples only have to find the right triangles: exact distances come from the
+        # triangles themselves, so they can be sparse (faster searches)
+        pts, tri_id = surface_samples(mesh, max(h, 1.0), limit=3_000_000)
+        tris = mesh.vertices.astype(np.float64)[mesh.faces]
+        return cls(grid, inside, d, cKDTree(pts), tri_id, tris)
+
+    def closest(self, pts, bound: float = np.inf, k: int = 16) -> tuple[np.ndarray, np.ndarray]:
+        """(distance, closest surface point) for each point, exact (point to triangle).
+
+        Candidates are the triangles of the k nearest samples; where two parts of
+        the surface are almost equally far (concave corners) both are among them.
+        Points farther than `bound` from every sample get inf.
+        """
+        pts = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
+        dist = np.full(len(pts), np.inf)
+        near = np.zeros_like(pts)
+        for s0 in range(0, len(pts), 400_000):
+            P = pts[s0:s0 + 400_000]
+            _, idx = self.tree.query(P, k=k, workers=-1, distance_upper_bound=bound)
+            ok = idx < self.tree.n
+            cand = np.where(ok, self.sample_tri[np.minimum(idx, self.tree.n - 1)], -1)
+            cand.sort(axis=1)  # drop repeated triangles: many samples share one
+            dup = np.zeros_like(cand, dtype=bool)
+            dup[:, 1:] = cand[:, 1:] == cand[:, :-1]
+            cand[dup] = -1
+            best_d = np.full(len(P), np.inf)
+            best_q = np.zeros_like(P)
+            for j in range(k):
+                rows = np.nonzero(cand[:, j] >= 0)[0]
+                if not len(rows):
+                    continue
+                t = self.tris[cand[rows, j]]
+                q = closest_on_triangles(P[rows], t[:, 0], t[:, 1], t[:, 2])
+                d = np.linalg.norm(P[rows] - q, axis=1)
+                better = d < best_d[rows]
+                best_d[rows[better]] = d[better]
+                best_q[rows[better]] = q[better]
+            dist[s0:s0 + 400_000] = best_d
+            near[s0:s0 + 400_000] = best_q
+        return dist, near
 
     def refine(self, levels, band: float | None = None, progress=None) -> None:
         """Exact distances for voxels within `band` of any of the given levels."""
@@ -197,44 +286,41 @@ class DistanceField:
         sel &= ~self.inside
         idx = np.argwhere(sel)
         bound = float(max(levels)) + band + 2.0 * self.grid.h
-        for s in range(0, len(idx), 2_000_000):
-            chunk = idx[s:s + 2_000_000]
-            dd, _ = self.tree.query(self.grid.points(chunk), workers=-1, distance_upper_bound=bound)
-            dd = np.where(np.isfinite(dd), dd, self.dist[tuple(chunk.T)])
-            self.dist[tuple(chunk.T)] = dd.astype(np.float32)
-            report(progress, 0.85 + 0.15 * min(1.0, (s + len(chunk)) / max(len(idx), 1)), "Measuring distances")
+        for s0 in range(0, len(idx), 2_000_000):
+            chunk = idx[s0:s0 + 2_000_000]
+            dd, _ = self.closest(self.grid.points(chunk), bound)
+            cur = self.dist[tuple(chunk.T)]
+            self.dist[tuple(chunk.T)] = np.where(np.isfinite(dd), dd, cur).astype(np.float32)
+            report(progress, 0.85 + 0.15 * min(1.0, (s0 + len(chunk)) / max(len(idx), 1)), "Measuring distances")
 
     def snap(self, mesh: Mesh, levels, max_move: float | None = None) -> Mesh:
         """Move every vertex of an iso-surface exactly onto the nearest of `levels`.
 
-        A point at distance d from its nearest surface point p is moved along
-        the line from p, to distance `level`: exact offsets regardless of the
-        voxel size (moves are capped at about a voxel).
+        A point at distance d from its closest surface point q is moved along
+        the line from q, to distance `level`: exact offsets regardless of the
+        voxel size (moves are capped below a voxel).
         """
         if self.tree is None or mesh.n_vertices == 0:
             return mesh
         levels = np.asarray(sorted(levels), float)
         max_move = 0.75 * self.grid.h if max_move is None else max_move
         v = mesh.vertices.astype(np.float64)
-        # every vertex is within about a voxel of a level: bounding the search makes it fast
-        d, idx = self.tree.query(v, workers=-1, distance_upper_bound=float(levels[-1]) + 2.5 * self.grid.h)
+        d, near = self.closest(v, float(levels[-1]) + 2.5 * self.grid.h)
         miss = ~np.isfinite(d)
         if miss.any():
-            d[miss], idx[miss] = self.tree.query(v[miss], workers=-1)
-        near = self.tree.data[idx]
+            d[miss], near[miss] = self.closest(v[miss])
         target = levels[np.argmin(np.abs(d[:, None] - levels[None, :]), axis=1)]
         ok = d > 1e-9
         move = np.clip(target - d, -max_move, max_move)
         direction = np.zeros_like(v)
         direction[ok] = (v[ok] - near[ok]) / d[ok, None]
-        out = v + direction * move[:, None]
-        return Mesh(out, mesh.faces)
+        return Mesh(v + direction * move[:, None], mesh.faces)
 
-    def exact(self, pts) -> np.ndarray:
-        """Exact distance to the model surface for arbitrary points."""
+    def exact(self, pts, level: float | None = None) -> np.ndarray:
+        """Exact distance to the model surface."""
         if self.tree is None:
             raise ValueError("field was built without exact distances")
-        return self.tree.query(np.asarray(pts, float).reshape(-1, 3), workers=-1)[0]
+        return self.closest(pts)[0]
 
     def column_top(self, x: float, y: float, level: float) -> float | None:
         """Highest z in the column at (x, y) where the distance is still below `level`."""

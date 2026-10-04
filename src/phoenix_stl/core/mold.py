@@ -213,18 +213,40 @@ def build_field(model: Mesh, p: MoldParams, exact: bool = True, progress=None) -
 
 
 def surfaces(fld: DistanceField, p: MoldParams, snap: bool = True):
-    """(shell, inner solid, outer solid) iso-surfaces, uncut."""
+    """(shell, inner solid, outer solid) iso-surfaces, uncut.
+
+    The shell's surface has two sides: the outer one is the outer solid, the
+    inner one (turned inside out) is the inner solid, so only one surface is
+    extracted and snapped.
+    """
     t, w = p.thickness, p.wall
     if snap and fld.tree is not None:
         fld.refine([t, t + w], band=2.0 * fld.grid.h)
     shell = iso_surface(shell_values(fld.dist, t, t + w), fld.grid)
-    inner = iso_surface(fld.dist - t, fld.grid)
-    outer = iso_surface(fld.dist - (t + w), fld.grid)
     if snap and fld.tree is not None:
         shell = fld.snap(shell, [t, t + w])
-        inner = fld.snap(inner, [t])
-        outer = fld.snap(outer, [t + w])
+    inner, outer = _split_sides(shell, fld, t, w)
     return shell, inner, outer
+
+
+def _split_sides(shell: Mesh, fld: DistanceField, t: float, w: float):
+    """Inner and outer solids from the shell: components classed by their distance to the model."""
+    from .analyze import edge_info, vertex_components
+    if shell.n_faces == 0:
+        empty = Mesh(np.zeros((0, 3)), np.zeros((0, 3)))
+        return empty, empty
+    e = edge_info(shell)
+    _, labels = vertex_components(shell.n_vertices, e.lo, e.hi)
+    face_label = labels[shell.faces[:, 0]]
+    # distance level of each component, from its vertices (the field estimate is enough)
+    g = fld.grid
+    idx = np.clip(np.round((shell.vertices - g.origin) / g.h).astype(np.int64), 0, np.array(g.shape) - 1)
+    dv = fld.dist[idx[:, 0], idx[:, 1], idx[:, 2]]
+    comp_d = np.bincount(labels, weights=dv) / np.maximum(np.bincount(labels), 1)
+    inner_faces = comp_d[face_label] < t + 0.5 * w
+    inner = Mesh(shell.vertices, shell.faces[inner_faces][:, ::-1]).compact()
+    outer = Mesh(shell.vertices, shell.faces[~inner_faces]).compact()
+    return inner, outer
 
 
 def preview(model: Mesh, p: MoldParams, progress=None) -> dict:
@@ -499,5 +521,5 @@ def _thickness_check(fld: DistanceField, inner: Mesh, z0: float, t: float) -> di
     keep = v[:, 2] > z0 + t
     if not keep.any() or fld.tree is None:
         return {}
-    d = fld.exact(v[keep])
+    d = fld.exact(v[keep], t)
     return {"min": float(d.min()), "max": float(d.max()), "mean": float(d.mean())}
