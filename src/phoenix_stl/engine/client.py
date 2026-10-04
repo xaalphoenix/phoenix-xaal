@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import itertools
 import multiprocessing as mp
+import os
+import shutil
 import tempfile
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -35,9 +38,33 @@ class Event:
     detail: str = ""
 
 
+STORE_PREFIX = "phoenix_stl_"
+STALE_SECONDS = 24 * 3600
+
+
+def cleanup_stale_stores() -> None:
+    """Remove part stores left behind by a crashed session (they can be GBs)."""
+    tmp = tempfile.gettempdir()
+    now = time.time()
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(tmp, name)
+        if name.startswith(STORE_PREFIX) and os.path.isdir(path):
+            try:
+                if now - os.path.getmtime(path) > STALE_SECONDS:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass
+
+
 class EngineClient:
     def __init__(self, root: str | None = None):
-        self.root = root or tempfile.mkdtemp(prefix="phoenix_stl_")
+        if root is None:
+            cleanup_stale_stores()
+        self.root = root or tempfile.mkdtemp(prefix=STORE_PREFIX)
         self._ctx = mp.get_context("spawn")
         self._ids = itertools.count(1)
         self._queue: deque[Job] = deque()

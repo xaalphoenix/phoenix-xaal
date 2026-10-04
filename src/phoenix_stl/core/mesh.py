@@ -9,10 +9,6 @@ import numpy as np
 CHUNK = 2_000_000
 
 
-class Cancelled(Exception):
-    """Raised by a progress callback to abort a long operation."""
-
-
 def report(progress, frac: float, msg: str = "") -> None:
     if progress is not None:
         progress(min(max(frac, 0.0), 1.0), msg)

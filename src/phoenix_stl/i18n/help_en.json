@@ -1,0 +1,131 @@
+{
+  "printer.profile": {
+    "title": "Printer",
+    "body": "The printer you will print on. Its build volume is drawn as a box, and every part shows whether it fits.",
+    "recommended": "Elegoo Saturn 4 Ultra 16K (211.7 × 118.4 × 220 mm).",
+    "tip": "A part that doesn't fit needs one more cut. Fit to Printer, which cuts automatically, comes in phase 2."
+  },
+  "printer.volume": {
+    "title": "Show printer volume",
+    "body": "Draws the build volume of the chosen printer around the selected part.",
+    "tip": "Green box: the part fits. Red box: it's too big."
+  },
+  "parts.list": {
+    "title": "Parts",
+    "body": "Every model and every piece you cut appears here. The selected part is the one tools work on.",
+    "tip": "Untick the checkbox to hide a part. Double-click to rename, Del to delete. Cut a piece again to keep splitting it step by step."
+  },
+  "cut.axis": {
+    "title": "Cut direction",
+    "body": "The axis the cutting plane faces. Z cuts horizontally (top/bottom), X and Y cut vertically.",
+    "recommended": "Z for most figures: flat cut faces print cleanly and are easy to glue.",
+    "tip": "Fine-tune with Tilt, or drag the 3D handle in the viewport."
+  },
+  "cut.tilt1": {
+    "title": "Tilt (first axis)",
+    "body": "Rotates the cutting plane around the first axis perpendicular to the cut direction, in degrees.",
+    "recommended": "0° unless the seam should follow a natural line of the model.",
+    "tip": "Angled cuts can hide seams along clothing, hair or armour edges."
+  },
+  "cut.tilt2": {
+    "title": "Tilt (second axis)",
+    "body": "Rotates the cutting plane around the second perpendicular axis, in degrees.",
+    "recommended": "0° unless needed.",
+    "tip": "Combine both tilts to place the plane at any angle."
+  },
+  "cut.offset": {
+    "title": "Position",
+    "body": "Moves the plane along its direction, in mm, measured from the part's center. The orange line in the viewport is exactly where the cut will be.",
+    "tip": "Avoid cutting through very thin areas (fingers, weapons): leave room for pins later."
+  },
+  "cut.center": {
+    "title": "Center",
+    "body": "Puts the plane back through the middle of the part with no tilt."
+  },
+  "cut.keep": {
+    "title": "Keep",
+    "body": "Which side(s) to keep after cutting. \"Side the arrow points to\" is the side the plane's normal arrow points at.",
+    "recommended": "Both parts.",
+    "tip": "Keep one side to trim off a base or a support plinth."
+  },
+  "cut.gizmo": {
+    "title": "3D handle",
+    "body": "Shows a draggable plane in the viewport. Drag the plane to move it, drag the arrow to rotate it. The numbers update automatically."
+  },
+  "cut.apply": {
+    "title": "Cut",
+    "body": "Cuts the selected part with the plane. Both new pieces are closed solids (the cut faces are filled), so they are printable right away.",
+    "tip": "Select one of the new pieces and cut again to split step by step. Very large models take a few seconds; the window stays responsive and Cancel stops it."
+  },
+  "repair.analyze": {
+    "title": "Analyze",
+    "body": "Checks if the model is a closed, printable solid: holes, flipped normals, non-manifold edges, duplicates and floating pieces.",
+    "tip": "Every opened file is analyzed automatically."
+  },
+  "repair.merge": {
+    "title": "Merge distance",
+    "body": "Vertices closer than this distance are joined. This closes tiny cracks where two surfaces almost meet.",
+    "recommended": "0 (only exact matches). Try 0.001–0.01 mm if the report shows many small holes.",
+    "tip": "Large values can collapse fine detail."
+  },
+  "repair.degenerate": {
+    "title": "Remove degenerate faces",
+    "body": "Deletes zero-area triangles (all three corners on a line or point). They confuse slicers and booleans.",
+    "recommended": "On."
+  },
+  "repair.duplicates": {
+    "title": "Remove duplicate faces",
+    "body": "Deletes triangles that appear twice. Duplicates cause non-manifold edges.",
+    "recommended": "On."
+  },
+  "repair.debris": {
+    "title": "Remove floating debris",
+    "body": "Deletes tiny separate pieces (smaller than 0.25% of the model size), usually leftover junk from modelling.",
+    "recommended": "On.",
+    "tip": "Real small parts (eyes, gems) are much larger than this limit and are kept."
+  },
+  "repair.orientation": {
+    "title": "Fix normals",
+    "body": "Makes every triangle face outward and consistently oriented. Inner walls of hollow models correctly stay facing inward.",
+    "recommended": "On."
+  },
+  "repair.holes": {
+    "title": "Fill holes",
+    "body": "Closes open gaps in the surface so the model becomes watertight.",
+    "recommended": "On. Phase 5 adds smooth curved filling for big holes."
+  },
+  "repair.max_hole": {
+    "title": "Max hole size",
+    "body": "Only fills holes with at most this many edges. All fills every hole.",
+    "recommended": "All.",
+    "tip": "Limit it if the model has an intentional big opening you want to keep."
+  },
+  "repair.apply": {
+    "title": "Auto Repair",
+    "body": "Runs every enabled repair step in the right order, then re-analyzes the model.",
+    "tip": "Clean models only cost an analysis; nothing is changed if nothing is wrong."
+  },
+  "repair.show_edges": {
+    "title": "Show problem edges",
+    "body": "Draws hole borders and non-manifold edges in red on the model, so you can see where the problems are."
+  },
+  "export.folder": {
+    "title": "Export folder",
+    "body": "Where the STL files are saved. Each part becomes one file named after the part.",
+    "tip": "Rename parts in the list first (for example head, body, arm_left)."
+  },
+  "export.selected": {
+    "title": "Export selected part",
+    "body": "Saves the selected part as a binary STL in millimetres, at full resolution."
+  },
+  "export.all": {
+    "title": "Export all visible parts",
+    "body": "Saves every part that is ticked in the list, one STL per part.",
+    "tip": "In Elegoo SatelLite you can import all files at once and arrange them on the plate."
+  },
+  "export.check": {
+    "title": "Warn before exporting",
+    "body": "Asks before saving parts that haven't passed the printable check.",
+    "recommended": "On."
+  }
+}

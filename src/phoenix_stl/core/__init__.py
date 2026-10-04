@@ -1,1 +1,1 @@
-from .mesh import Cancelled, Mesh  # noqa: F401
+from .mesh import Mesh  # noqa: F401
