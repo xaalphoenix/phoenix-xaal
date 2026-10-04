@@ -9,7 +9,6 @@ import manifold3d as m3d
 import numpy as np
 
 from .mesh import Mesh
-from .weld import weld_mesh
 
 # Parts that only touch (e.g. two halves of a cut) are not fused by an exact
 # union: the shared faces survive as zero-thickness leftovers. Growing each
@@ -31,14 +30,6 @@ def to_manifold(mesh: Mesh) -> m3d.Manifold:
     return man
 
 
-def _raw_mesh(man: m3d.Manifold) -> tuple[Mesh, int]:
-    mg = man.to_mesh()
-    v = np.asarray(mg.vert_properties)[:, :3]
-    # Output can repeat a position across internal runs; weld so exported
-    # files re-import with the same topology.
-    return weld_mesh(Mesh(v, np.asarray(mg.tri_verts)), 0.0), len(v)
-
-
 def _is_manifold(mesh: Mesh) -> bool:
     from .analyze import edge_info
     f = mesh.faces
@@ -47,24 +38,59 @@ def _is_manifold(mesh: Mesh) -> bool:
     return bool(np.all(edge_info(mesh).count == 2))
 
 
-def from_manifold(man: m3d.Manifold) -> Mesh:
-    """Mesh of a manifold.
+def _extra_copies(v: np.ndarray) -> np.ndarray:
+    """Indices of float32 vertices at the same position as an earlier one."""
+    b = np.ascontiguousarray(v + np.float32(0.0)).view(np.uint32).astype(np.uint64)  # +0.0: -0.0 equals 0.0
+    with np.errstate(over="ignore"):
+        key = ((b[:, 0] << np.uint64(32)) | b[:, 1]) * np.uint64(0x9E3779B97F4A7C15) ^ b[:, 2] * np.uint64(
+            0xC2B2AE3D27D4EB4F)
+    order = np.argsort(key)
+    hit = np.nonzero(key[order][1:] == key[order][:-1])[0]
+    if not len(hit):
+        return np.zeros(0, dtype=np.int64)
+    # only the few vertices that share a key are compared exactly
+    cand = np.sort(order[np.unique(np.r_[hit, hit + 1])])
+    _, first, inv = np.unique(v[cand] + np.float32(0.0), axis=0, return_index=True, return_inverse=True)
+    return cand[np.arange(len(cand)) != first[inv.ravel()]]
 
-    Distinct points that an STL float cannot tell apart would merge into broken
-    edges; if that happens, sub-micron features are simplified away (moving the
-    surface by a few micrometres at most, far below a printer pixel) and the
-    conversion is retried.
+
+def _separate_collapsed(v: np.ndarray, f: np.ndarray) -> np.ndarray:
+    """Nudge vertices that landed on the same float32 position apart (by ~0.1 um).
+
+    The boolean keeps them as different points; merging them (as reading the
+    STL back would) breaks the surface, so each extra copy moves a hair towards
+    the middle of its own neighbours instead.
     """
-    mesh, n_raw = _raw_mesh(man)
-    if mesh.n_vertices == n_raw or _is_manifold(mesh):
-        return mesh
-    tol = 0.002
-    while tol <= 0.06:
-        mesh, _ = _raw_mesh(man.simplify(tol))
-        if _is_manifold(mesh):
+    v = v.astype(np.float32).copy()
+    scale = float(np.abs(v).max()) or 1.0
+    step = max(1e-5, 16.0 * float(np.spacing(np.float32(scale))))
+    for _ in range(4):
+        extra = _extra_copies(v)
+        if not len(extra):
             break
-        tol *= 3
-    return mesh
+        nsum = np.zeros((len(v), 3))
+        ncnt = np.zeros(len(v))
+        for a, b in ((0, 1), (1, 2), (2, 0), (1, 0), (2, 1), (0, 2)):
+            np.add.at(nsum, f[:, a], v[f[:, b]])
+            np.add.at(ncnt, f[:, a], 1)
+        towards = nsum[extra] / np.maximum(ncnt[extra], 1)[:, None] - v[extra]
+        towards /= np.maximum(np.linalg.norm(towards, axis=1, keepdims=True), 1e-30)
+        v[extra] = v[extra] + (step * towards).astype(np.float32)
+        step *= 2
+    return v
+
+
+def from_manifold(man: m3d.Manifold) -> Mesh:
+    """Mesh of a manifold, keeping its topology exactly.
+
+    Its vertices are distinct points; any two that round to the same STL
+    float are moved apart by a fraction of a micrometre rather than merged, so
+    the exported file reads back as the same closed surface.
+    """
+    mg = man.to_mesh()
+    v = np.asarray(mg.vert_properties)[:, :3]
+    f = np.asarray(mg.tri_verts)
+    return Mesh(_separate_collapsed(v, f), f)
 
 
 def _grown(man: m3d.Manifold) -> m3d.Manifold:

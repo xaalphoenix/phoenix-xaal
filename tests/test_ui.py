@@ -295,3 +295,51 @@ def test_mold_tab(window, qtbot, tmp_path, sphere):
     window.undo()
     wait_idle(qtbot, window)
     assert sorted(p.name for p in window.parts.parts.values()) == ["ball"]
+
+
+def test_decal_tab(window, qtbot, tmp_path, cube):
+    import numpy as np
+
+    from phoenix_stl.core.io_stl import save_stl
+
+    src = str(tmp_path / "box.stl")
+    save_stl(cube, src)
+    window.open_files([src])
+    wait_idle(qtbot, window)
+    window.tabs.setCurrentIndex(window._tab_index[window.decal])
+    qtbot.wait(100)
+    tool, panel = window.decal_tool, window.decal
+    pid = window.parts.selected_id()
+    assert tool.pid == pid and not panel.apply_btn.isEnabled()
+    # typed text: the frame keeps the text's proportions
+    panel.text.setText("AB")
+    assert tool.src is not None and tool.src.shape[1] > tool.src.shape[0]
+    panel.size_w.setValue(12)
+    assert panel.size_h.value() == pytest.approx(12 * tool.src.shape[0] / tool.src.shape[1], abs=0.1)
+    # place it on the top face: a single slanted triangle normal does not tilt the frame
+    tool._picked(pid, np.array([1.0, 2.0, 10.0]), np.array([0.1, 0.0, 0.99]))
+    assert np.allclose(tool.normal, (0, 0, 1), atol=1e-6) and tool.origin[2] == pytest.approx(10.0)
+    assert panel.apply_btn.isEnabled()
+    qtbot.wait(100)
+    assert "decal_patch" in window.viewport._overlays and "decal_frame" in window.viewport._overlays
+    # drag the frame along the surface
+    tool._select(0)
+    tool._drag(0, (3.0, 0.0, 0.0))
+    tool._drag_done()
+    assert tool.origin[0] == pytest.approx(4.0) and tool.origin[2] == pytest.approx(10.0)
+    panel.detail.setCurrentIndex(2)
+    panel.apply_btn.click()
+    wait_idle(qtbot, window)
+    part = window.parts.selected()
+    assert part.id != pid and part.name == "box" and part.status == "printable"
+    assert part.bounds[1][2] == pytest.approx(10.8, abs=0.05)
+    assert tool.origin is None and not panel.apply_btn.isEnabled()  # a new part: place again
+    window.undo()
+    wait_idle(qtbot, window)
+    assert window.parts.selected_id() == pid and tool.origin is not None  # the frame comes back
+    # an image: dark parts of a light picture are the logo
+    lum = np.ones((50, 50), np.float32)
+    lum[10:40, 10:40] = 0.0
+    tool.set_image(lum, name="square.png")
+    assert panel.use_image.isChecked() and tool.src[25, 25] == 255 and tool.src[2, 2] == 0
+    assert panel.size_h.value() == pytest.approx(panel.size_w.value())

@@ -230,3 +230,24 @@ def test_engine_mold(engine, tmp_path, sphere):
     engine.wait(engine.submit("export", items=items))
     for _, path in items:
         assert analyze(load_stl(path))[0].printable
+
+
+def test_engine_decal(engine, tmp_path, cube):
+    from phoenix_stl.core.decal import DecalParams
+    part = load(engine, tmp_path, cube, "box")["part"]
+    img = np.zeros((40, 80), np.uint8)
+    img[10:30, 10:70] = 255
+    p = DecalParams(width=16, height=8, depth=0.5, resolution=0.25)
+    ev = engine.wait(engine.submit("decal", pid=part["id"], name="box", origin=(0, 0, 10), normal=(0, 0, 1),
+                                   image=img, params=p.to_dict()))
+    assert ev.kind == "result", ev
+    assert ev.result["removed"] == [part["id"]]
+    new = ev.result["added"][0]["part"]
+    assert new["name"] == "box" and new["bounds"][1][2] == pytest.approx(10.5, abs=0.02)
+    assert ev.result["info"]["volume_change"] == pytest.approx(12 * 4 * 0.5, rel=0.1)
+    ev = engine.wait(engine.submit("analyze", pid=new["id"]))
+    assert ev.result["report"]["printable"]
+    # off the model, or nothing to put there
+    ev = engine.wait(engine.submit("decal", pid=part["id"], name="box", origin=(0, 0, 300), normal=(0, 0, 1),
+                                   image=img, params=p.to_dict()))
+    assert ev.kind == "error" and ev.code == "decal_failed"

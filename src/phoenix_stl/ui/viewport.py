@@ -169,14 +169,15 @@ class Viewport(QWidget):
     def _on_press(self, style, _event):
         x, y = self.plotter.iren.interactor.GetEventPosition()
         if self._pick_cb is not None:
-            cb, self._pick_cb = self._pick_cb, None
-            self.set_drag(self._drag_targets, *(self._drag_cb or (None, None)))
             picker = vtkCellPicker()
             picker.SetTolerance(0.0005)
-            if picker.Pick(x, y, 0, self.plotter.renderer):
-                pid = self._pid_of(picker.GetActor())
-                if pid is not None:
-                    cb(pid, np.array(picker.GetPickPosition()), np.array(picker.GetPickNormal()))
+            pid = self._pid_of(picker.GetActor()) if picker.Pick(x, y, 0, self.plotter.renderer) else None
+            if pid is None:
+                style.OnLeftButtonDown()  # missed the parts: turn the view, keep waiting for a click on one
+                return
+            cb, self._pick_cb = self._pick_cb, None
+            self.set_drag(self._drag_targets, *(self._drag_cb or (None, None)))
+            cb(pid, np.array(picker.GetPickPosition()), np.array(picker.GetPickNormal()))
             return
         if self._handles is not None:
             i = self._nearest_handle(x, y)

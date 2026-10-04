@@ -15,6 +15,7 @@ from .core import connectors as C
 from .core.analyze import analyze
 from .core.io_stl import load_stl, save_stl
 from .core.mesh import Mesh
+from .core.decal import DecalParams
 from .core.mold import MoldParams
 from .engine import EngineClient
 
@@ -79,6 +80,13 @@ def run() -> int:
         assert abs(th["min"] - 5) < 0.05 and abs(th["max"] - 5) < 0.05, th
         for p in ev.result["added"]:
             outs.append((p["part"]["id"], os.path.join(tmp, p["part"]["name"] + ".stl")))
+        # a raised square on top of the sphere
+        img = np.zeros((40, 40), np.uint8)
+        img[8:32, 8:32] = 255
+        ev = eng.wait(eng.submit("decal", pid=part["id"], name="sphere_decal", origin=(0, 0, 10), normal=(0, 0, 1),
+                                 image=img, params=DecalParams(width=8, height=8, depth=0.6, resolution=0.25).to_dict()))
+        assert ev.kind == "result" and ev.result["info"]["volume_change"] > 10, ev
+        outs.append((ev.result["added"][0]["part"]["id"], os.path.join(tmp, "sphere_decal.stl")))
         ev = eng.wait(eng.submit("export", items=outs))
         assert ev.kind == "result", ev
         for _, path in outs:

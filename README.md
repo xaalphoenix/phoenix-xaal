@@ -22,7 +22,7 @@
 - رابط **فارسی و انگلیسی**. موس که روی هر تنظیمی بماند، `⋯` و راهنمای آن تنظیم ظاهر می‌شود (یا F1).
 - خروجی STL باینری (میلی‌متر)، هر قطعه یک فایل.
 
-## قابلیت‌های فاز ۲ (تا اینجا)
+## قابلیت‌های فاز ۲
 
 - **جابه‌جایی، چرخش و Scale** قطعه‌ها با موس (کشیدن روی میز، Shift برای بالا و پایین) یا عدد. «روی میز»، «وسط میز» و **خواباندن روی یک سطح**.
 - **Undo / Redo** (تا ۳۰ قدم) برای همه‌ی کارها.
@@ -55,6 +55,15 @@
 - **حجم سیلیکون** به میلی‌لیتر و گرم.
 - پیش‌نمایش سریع با هر تغییر تنظیمات. خروجی: دو تکه‌ی قالب و صفحه‌ی زیر، به‌صورت قطعه‌های معمولی و قابل پرینت.
 
+### نقش تصویر و متن (تب «نقش»)
+
+- **متن** با هر فونت نصب‌شده (فارسی درست به هم می‌چسبد و راست‌به‌چپ است) یا **تصویر** PNG/JPG/BMP.
+- **برجسته** یا **حکاکی**، با ارتفاع/عمق به میلی‌متر. عمق در امتداد سطح اندازه‌گیری می‌شود، پس روی سطح منحنی هم همه‌جا یکسان است.
+- **لوگو/متن** با لبه‌ی تیز (آستانه قابل تنظیم) یا **بافت** که روشنی هر نقطه ارتفاع آن است (چرم، فلس، سنگ)، با تکرار، نرم کردن و برعکس.
+- **گذاشتن روی مدل** با یک کلیک؛ قاب با کشیدن نقطه‌ی نارنجی روی سطح جابه‌جا می‌شود. عرض، ارتفاع (با حفظ تناسب) و چرخش.
+- **پیچیدن دور استوانه** برای بطری، دست و ستون؛ شعاع خودکار از روی سطح اندازه‌گیری می‌شود.
+- پیش‌نمایش رنگی روی خود سطح مدل. نتیجه یک قطعه‌ی بسته و قابل پرینت است؛ Undo قطعه‌ی قبلی را برمی‌گرداند.
+
 ## میانبرها
 
 | کلید | کار |
@@ -73,7 +82,8 @@
 
 ## English
 
-Prepare STL files for 3D printing: **cut**, **connect** and **repair**, even very heavy files. STL in, STL out.
+Prepare STL files for 3D printing: **cut**, **connect**, **repair**, make **silicone mother molds** and put
+**text or images** on the surface, even with very heavy files. STL in, STL out.
 
 **Run on Windows:** open the latest successful **Windows build** run under the repository's *Actions* tab, download the `PhoenixSTLStudio-win64` artifact, unzip it, and run `PhoenixSTLStudio.exe`.
 
@@ -99,7 +109,7 @@ pyinstaller packaging/phoenix_stl.spec                 # frozen build
 ```
 src/phoenix_stl/
   core/      numpy mesh engine: io_stl, weld, analyze, repair, cut, grid, surface_cut, boolean,
-             transform, section, connectors, sdf, mold, lod, hardware
+             transform, section, connectors, sdf, mold, decal, lod, hardware
   engine/    separate process that owns full-resolution parts (on disk); progress, cancel, crash isolation
   ui/        PySide6 + pyvistaqt: main window, viewport, parts, panels, hover help, i18n
   i18n/      en/fa UI strings and hover-help texts (JSON)

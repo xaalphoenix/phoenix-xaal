@@ -17,6 +17,7 @@ import numpy as np
 from ..core import hardware
 from ..core.analyze import analyze as _analyze
 from ..core import connectors as conn
+from ..core import decal as decallib
 from ..core import mold as moldlib
 from ..core.boolean import NotSolid, union
 from ..core.cut import plane_cut
@@ -287,6 +288,26 @@ def op_mold_build(store, progress, pid: str, name: str, params: dict, preview_fa
     return {"removed": [], "added": added, "info": res.info, "warnings": res.warnings}
 
 
+def op_decal(store, progress, pid: str, name: str, origin, normal, image, params: dict,
+             preview_faces: int = 2_000_000):
+    """Raise an image out of (or press it into) the part's surface; the part is replaced."""
+    mesh = store.get(pid)
+    p = decallib.DecalParams.from_dict(params)
+    _ensure_memory("boolean", 2 * mesh.n_faces)
+    # the voxel grid needs about 110 bytes per voxel at its peak
+    cap = int(min(40_000_000, 0.5 * hardware.system_info()["ram_available"] / 110))
+    frame = decallib.oriented_frame(origin, normal, p.rotation)
+    try:
+        out, info = decallib.apply_decal(mesh, frame, np.asarray(image), p, _sub(progress, 0.0, 0.9),
+                                         max_voxels=cap)
+    except MemoryError:
+        raise EngineError("decal_too_big") from None
+    except (ValueError, NotSolid) as e:
+        raise EngineError("decal_failed", str(e)) from None
+    return {"removed": [pid], "added": [_store_new(store, out, name, preview_faces, _sub(progress, 0.9, 1.0))],
+            "info": info}
+
+
 def op_transform(store, progress, items: list, on_bed: bool = False, centered: bool = False):
     """items: [(pid, name, 4x4 matrix)] -> each part replaced by its moved copy.
 
@@ -380,6 +401,7 @@ OPS = {
     "coupon": op_coupon,
     "mold_preview": op_mold_preview,
     "mold_build": op_mold_build,
+    "decal": op_decal,
     "transform": op_transform,
     "merge": op_merge,
     "restore": op_restore,

@@ -466,5 +466,85 @@
   "mold.build": {
     "title": "Build mold",
     "body": "Builds the mold at the chosen quality and adds the parts (two halves and the base plate) to the list. The silicone thickness is measured on the result."
+  },
+  "decal.place": {
+    "title": "Place on the model",
+    "body": "Press it, then click on the model where the centre of the decal should go. The frame lies on the surface there, with image up following the world Z axis. Drag the orange dot afterwards to slide it over the surface.",
+    "recommended": "Turn the model so you look straight at the spot first."
+  },
+  "decal.text": {
+    "title": "Text",
+    "body": "The typed text becomes the decal. Persian and other right-to-left scripts are joined and ordered correctly. The frame is fitted to the letters.",
+    "recommended": "For resin, letters at least 0.4 mm wide and 0.3 mm high print cleanly."
+  },
+  "decal.font": {
+    "title": "Font",
+    "body": "Any font installed on the computer. Bold letters have thicker strokes, which print better when small.",
+    "recommended": "Bold, simple fonts for small text."
+  },
+  "decal.image": {
+    "title": "Image",
+    "body": "A PNG, JPG or BMP picture. As a logo, the dark parts on a light background are used (or the opaque parts of a picture with transparency). As a texture, brightness is the height, like a height map.",
+    "recommended": "High contrast black-and-white images for logos; up to 1600 pixels are used."
+  },
+  "decal.mode": {
+    "title": "Raised or pressed in",
+    "body": "Raised adds material on top of the surface. Pressed in carves the image into the surface.",
+    "recommended": "Pressed in is safer on thin walls of hollow models only if the wall is thicker than the depth plus 1 mm."
+  },
+  "decal.depth": {
+    "title": "Height / depth",
+    "body": "How far the image rises out of the surface or goes into it, measured along the surface, so it is the same on curved parts.",
+    "recommended": "0.4–1 mm for resin, 0.6–1.5 mm for FDM."
+  },
+  "decal.kind": {
+    "title": "Image use",
+    "body": "Logo / text gives a flat top and steep sides. Texture uses every shade of grey as a height, for patterns like leather, scales or stone.",
+    "recommended": "Logo for text and symbols, texture for surfaces."
+  },
+  "decal.threshold": {
+    "title": "Threshold",
+    "body": "For logos: the brightness where the image counts as on. Lower it to make thin lines thicker, raise it to make them thinner.",
+    "recommended": "50 %."
+  },
+  "decal.invert": {
+    "title": "Invert",
+    "body": "Swaps the on and off parts: for text, the plate around the letters is raised and the letters stay low.",
+    "recommended": "Off."
+  },
+  "decal.blur": {
+    "title": "Smooth",
+    "body": "Softens the image before it is used (in pixels of the image). Removes noise in photos and makes texture reliefs gentler.",
+    "recommended": "0 for logos; 1–3 for textures from photos."
+  },
+  "decal.tile": {
+    "title": "Repeat",
+    "body": "Repeats the image this many times across and down the frame, for patterns.",
+    "recommended": "1 for logos; 3–10 for patterns."
+  },
+  "decal.size": {
+    "title": "Size",
+    "body": "Width and height of the frame on the surface, in mm. With Keep proportions the height follows the width so the image is not stretched.",
+    "recommended": "Keep proportions on."
+  },
+  "decal.rotation": {
+    "title": "Rotation",
+    "body": "Turns the image around the surface normal, in degrees.",
+    "recommended": "0° keeps image up pointing to world up."
+  },
+  "decal.projection": {
+    "title": "Projection",
+    "body": "Flat projects the image straight onto the surface. Wrap bends it around a cylinder (bottles, arms, columns) so it is not stretched at the sides. The radius is measured from the surface when set to 0.",
+    "recommended": "Wrap for round parts when the decal covers more than a quarter of the way around."
+  },
+  "decal.detail": {
+    "title": "Detail",
+    "body": "Size of the voxels used to build the relief. Smaller is sharper but slower and needs more memory.",
+    "recommended": "Normal (0.1 mm) for most decals, Fine (0.05 mm) for small text on resin."
+  },
+  "decal.apply": {
+    "title": "Apply decal",
+    "body": "Builds the relief and joins it with the part (or carves it out). The part is replaced; Undo brings the old one back.",
+    "recommended": "Check the preview from a few sides first."
   }
 }

@@ -28,8 +28,10 @@ from .history import History, Step, snapshot
 from .i18n import LANGS, i18n, t
 from .panels.cut_panel import CutPanel
 from .connect_tool import ConnectTool
+from .decal_tool import DecalTool
 from .mold_tool import MoldTool
 from .panels.connect_panel import ConnectPanel
+from .panels.decal_panel import DecalPanel
 from .panels.export_panel import ExportPanel
 from .panels.mold_panel import MoldPanel
 from .panels.move_panel import MovePanel, angles_of, compose
@@ -102,13 +104,15 @@ class MainWindow(QMainWindow):
         self.conn = ConnectPanel(self.help.register)
         self.move = MovePanel(self.help.register)
         self.mold = MoldPanel(self.help.register)
+        self.decal = DecalPanel(self.help.register)
         self.repair = RepairPanel(self.help.register)
         self.export = ExportPanel(self.help.register)
         self.tabs = QTabWidget()
         self._tab_keys = []
         self._tab_index = {}
         for panel, key in ((self.cut, "tab.cut"), (self.conn, "tab.connect"), (self.move, "tab.move"),
-                           (self.mold, "tab.mold"), (self.repair, "tab.repair"), (self.export, "tab.export")):
+                           (self.mold, "tab.mold"), (self.decal, "tab.decal"), (self.repair, "tab.repair"),
+                           (self.export, "tab.export")):
             self._tab_index[panel] = self.tabs.addTab(_scroll(panel), "")
             self._tab_keys.append(key)
         self.tools_dock = QDockWidget(self)
@@ -132,6 +136,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self.conn_tool = ConnectTool(self)
         self.mold_tool = MoldTool(self)
+        self.decal_tool = DecalTool(self)
         self._connect()
         self._pending_plane = None
         self._current_tab = self.tabs.currentIndex()
@@ -301,6 +306,7 @@ class MainWindow(QMainWindow):
         self.cut.set_busy(busy)
         self.conn.set_busy(busy)
         self.mold.set_busy(busy)
+        self.decal.set_busy(busy)
         self.move.set_busy(busy)
         self.export.set_busy(busy)
         self.parts.set_busy(busy)
@@ -412,6 +418,7 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
             self.viewport.cancel_pick()
+            self.decal.set_place_mode(False)
         super().keyPressEvent(ev)
 
     # -- actions ----------------------------------------------------------------------
@@ -796,6 +803,7 @@ class MainWindow(QMainWindow):
         self._update_tool_overlays()
         self.conn_tool.refresh()
         self.mold_tool.refresh()
+        self.decal_tool.refresh()
 
     def _multi_selection_changed(self):
         sel = [p.id for p in self.parts.selected_parts()]
@@ -823,6 +831,7 @@ class MainWindow(QMainWindow):
         self._update_tool_overlays()
         self.conn_tool.refresh()
         self.mold_tool.refresh()
+        self.decal_tool.refresh()
         self._update_volume()
         self._update_problems()
 
@@ -1151,6 +1160,9 @@ class MainWindow(QMainWindow):
     def _done_mold_build(self, job, r):
         self.mold_tool.done_build(job, r)
 
+    def _done_decal(self, job, r):
+        self.decal_tool.done(job, r)
+
     def _volume_toggled(self, on):
         self.a_volume.setChecked(on)
         self._update_volume()
@@ -1213,8 +1225,9 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setText(t("progress.cancel"))
         for code, a in self.lang_actions.items():
             a.setChecked(code == i18n().lang)
-        for panel in (self.parts, self.cut, self.conn, self.move, self.mold, self.repair, self.export):
+        for panel in (self.parts, self.cut, self.conn, self.move, self.mold, self.decal, self.repair, self.export):
             panel.retranslate()
+        self.decal_tool.retranslate()
         self.conn_tool.validate()
         key, kw = self._last_msg
         if key == "repair.done":
