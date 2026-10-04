@@ -195,3 +195,41 @@ def test_cut_reimport_stays_manifold(tmp_path, sphere):
 def test_cut_grazing_face_is_not_a_cut(cube):
     res = plane_cut(cube, (0, 0, 1), (0, 0, -10))  # exactly the bottom face
     assert res.negative.n_faces == 0 and res.positive.n_faces == cube.n_faces
+
+
+@pytest.fixture
+def stepped():
+    from conftest import from_manifold
+    import manifold3d as m3d
+    M = m3d.Manifold
+    return from_manifold(M.cube((40, 40, 10)) + M.cube((20, 20, 10)).translate((10, 10, 10))
+                         + M.cube((10, 10, 10)).translate((15, 15, 20)))
+
+
+@pytest.fixture
+def hollow_box():
+    from conftest import from_manifold
+    import manifold3d as m3d
+    return from_manifold(m3d.Manifold.cube((30, 30, 30), True) - m3d.Manifold.cube((26, 26, 26), True))
+
+
+@pytest.mark.parametrize("normal,origin", [((0, 0, 1), (0, 0, 10)), ((0, 0, 1), (0, 0, 20)),
+                                           ((1, 0, 0), (10, 0, 0)), ((1, 0, 0), (15, 0, 0))])
+def test_cut_exactly_at_cad_faces(tmp_path, stepped, normal, origin):
+    # The plane lies exactly on model faces/edges: faces in the plane must go to the right side.
+    res = plane_cut(stepped, normal, origin)
+    assert np.isclose(res.positive.volume() + res.negative.volume(), stepped.volume(), rtol=1e-9)
+    for part in (res.positive, res.negative):
+        p = str(tmp_path / "p.stl")
+        save_stl(part, p)
+        assert is_valid_solid(load_stl(p)) and analyze(load_stl(p))[0].printable
+
+
+@pytest.mark.parametrize("z", [-13.0, 0.0, 13.0, 14.0])
+def test_cut_hollow_box_collinear_caps(hollow_box, z):
+    # Box sides give collinear cap points; z = +-13 is exactly the cavity floor/ceiling.
+    res = plane_cut(hollow_box, (0, 0, 1), (0, 0, z))
+    assert "cap_fallback" not in res.warnings
+    for part in (res.positive, res.negative):
+        assert is_valid_solid(part) and analyze(part)[0].printable
+    assert np.isclose(res.positive.volume() + res.negative.volume(), hollow_box.volume(), rtol=1e-9)
